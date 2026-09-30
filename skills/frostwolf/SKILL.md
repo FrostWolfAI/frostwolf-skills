@@ -70,7 +70,8 @@ TypeScript, OpenAI:
 
 ```ts
 const create = fw.guard.decorate(
-  (body) => openai.chat.completions.create(body),
+  (body: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming) =>
+    openai.chat.completions.create(body),
   { baseUrl: "https://api.openai.com/v1", provider: "openai" },
 );
 
@@ -81,11 +82,14 @@ if ("error" in completion) return res.status(400).json(completion);
 TypeScript, Anthropic:
 
 ```ts
-const create = fw.guard.decorate((body) => anthropic.messages.create(body), {
-  baseUrl: "https://api.anthropic.com",
-  provider: "anthropic",
-});
+const create = fw.guard.decorate(
+  (body: Anthropic.MessageCreateParamsNonStreaming) =>
+    anthropic.messages.create(body),
+  { baseUrl: "https://api.anthropic.com", provider: "anthropic" },
+);
 ```
+
+In strict TypeScript, annotate `body` with the provider's request type. Without it the parameter is inferred as `unknown` and `tsc` fails. Use a `...Streaming` params type (and the matching call) for streamed requests.
 
 Python, OpenAI (sync or async; the wrapper matches the function it wraps):
 
