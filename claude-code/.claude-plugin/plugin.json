@@ -1,0 +1,65 @@
+{
+  "name": "frostwolf",
+  "displayName": "FrostWolf",
+  "version": "0.1.0",
+  "description": "Cloak personal data and secrets before Claude sees them, and block prompt injection, in every Claude Code session.",
+  "author": {
+    "name": "FrostWolf",
+    "url": "https://frostwolf.app"
+  },
+  "homepage": "https://frostwolf.app",
+  "repository": "https://github.com/FrostWolfAI/frostwolf-skills",
+  "license": "Apache-2.0",
+  "keywords": [
+    "security",
+    "pii",
+    "prompt-injection",
+    "cloak",
+    "frostwolf"
+  ],
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "FrostWolf API key",
+      "description": "Your FrostWolf API key, from https://frostwolf.app. Stored in your system's secure credential store.",
+      "sensitive": true,
+      "required": true
+    },
+    "endpoint": {
+      "type": "string",
+      "title": "API endpoint",
+      "description": "FrostWolf API base URL. Leave empty for https://api.frostwolf.app.",
+      "default": ""
+    },
+    "prompt_personal_data": {
+      "type": "string",
+      "title": "Personal data in prompts",
+      "description": "block refuses a prompt that carries personal data and offers a cloaked version to send instead. warn sends it as typed and tells you.",
+      "options": [
+        "block",
+        "warn"
+      ],
+      "default": "block"
+    },
+    "on_unavailable": {
+      "type": "string",
+      "title": "When FrostWolf is unreachable",
+      "description": "block refuses prompts, tool calls, and tool output FrostWolf could not check. allow lets them through unchecked.",
+      "options": [
+        "block",
+        "allow"
+      ],
+      "default": "block"
+    },
+    "display": {
+      "type": "string",
+      "title": "Terminal display",
+      "description": "restore shows real values where Claude wrote tokens. tokens shows the tokens, as Claude sees them.",
+      "options": [
+        "restore",
+        "tokens"
+      ],
+      "default": "restore"
+    }
+  }
+}

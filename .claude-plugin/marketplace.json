@@ -1,0 +1,15 @@
+{
+  "name": "frostwolf",
+  "description": "FrostWolf plugins for Claude Code",
+  "owner": {
+    "name": "FrostWolf",
+    "url": "https://frostwolf.app"
+  },
+  "plugins": [
+    {
+      "name": "frostwolf",
+      "source": "./claude-code",
+      "description": "Cloak personal data and secrets before Claude sees them, and block prompt injection, in every Claude Code session."
+    }
+  ]
+}
