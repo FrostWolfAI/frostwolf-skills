@@ -23,6 +23,8 @@ claude plugin install frostwolf --marketplace FrostWolfAI/frostwolf-skills --con
 
 This adds the FrostWolf marketplace, installs the plugin, and keeps your key in
 your system's secure credential store. Start a new session to load the hooks.
+The Integrations page of the FrostWolf console shows the command with a new key
+filled in.
 
 A key typed into a shell command stays in your shell history. To be prompted
 for it instead, install from a Claude Code session:
@@ -80,10 +82,17 @@ the values in memory. It listens on a socket only your account can open, under
 Claude Code's plugin data directory, and exits after two hours without
 activity. Values never touch disk.
 
+When a session starts, the plugin checks in with the device's name, operating
+system and architecture, and the plugin, Claude Code, and Node.js versions,
+under a random installation id kept in the plugin's data directory. The
+FrostWolf console lists these devices. A check-in carries no prompt, file, or
+value, and a failed check-in never delays a session.
+
 ```
 src/
   hook-main.ts    entry point of every hook; prints the decision
   hook.ts         hands the event to the service, or fails closed
+  checkin.ts      reports the device when a session starts
   daemon-main.ts  entry point of the local service
   daemon.ts       the service: an HTTP server on a private socket
   handlers.ts     what each hook event does

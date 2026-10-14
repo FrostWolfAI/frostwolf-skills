@@ -5,7 +5,7 @@ import { startService } from "./daemon.js";
  * running. Takes the socket and log paths as arguments.
  */
 async function main(): Promise<void> {
-  const [socket, log] = process.argv.slice(2);
+  const [socket, log, dataDir] = process.argv.slice(2);
   if (socket === undefined) {
     process.exitCode = 1;
     return;
@@ -14,6 +14,7 @@ async function main(): Promise<void> {
   const service = await startService({
     socket,
     ...(log === undefined ? {} : { log }),
+    ...(dataDir === undefined ? {} : { dataDir }),
     onIdle: () => process.exit(0),
   });
 

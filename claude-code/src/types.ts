@@ -73,6 +73,8 @@ export type HookOutput = Record<string, unknown>;
 export interface ServiceRequest {
   readonly config: HookConfig;
   readonly input: HookInput;
+  /** The Claude Code version the hook runs under, when it can be told. */
+  readonly hostVersion: string | null;
 }
 
 /** What the local service answers. */

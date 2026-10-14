@@ -1,6 +1,7 @@
 import { appendFileSync, unlinkSync } from "node:fs";
 import { createServer, request, type IncomingMessage, type Server } from "node:http";
 import type { FetchLike } from "@frostwolfai/sdk";
+import { installIdIn, sendCheckIn } from "./checkin.js";
 import { Handlers } from "./handlers.js";
 import { GuardPool } from "./pool.js";
 import { HEALTH_PATH, HOOK_PATH } from "./protocol.js";
@@ -36,6 +37,8 @@ export interface ServiceOptions {
   readonly socket: string;
   /** Where errors are written. Never a value: SDK errors carry no payload. */
   readonly log?: string;
+  /** Where the installation id is kept. Without one, sessions do not check in. */
+  readonly dataDir?: string;
   readonly idleMs?: number;
   /** Override the transport, for tests. */
   readonly fetch?: FetchLike;
@@ -81,7 +84,26 @@ export async function startService(
     onError: log,
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   });
-  const handlers = new Handlers(guards, new Sessions());
+  const transport: FetchLike =
+    options.fetch ?? ((url, init) => fetch(url, init as RequestInit));
+  const dataDir = options.dataDir;
+  let installId: string | null = null;
+  const handlers = new Handlers(
+    guards,
+    new Sessions(),
+    dataDir === undefined
+      ? undefined
+      : (config, hostVersion) =>
+          sendCheckIn(
+            {
+              fetch: transport,
+              installId: () => (installId ??= installIdIn(dataDir)),
+              onError: log,
+            },
+            config,
+            hostVersion,
+          ),
+  );
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
 
   let idleTimer: NodeJS.Timeout | undefined;
@@ -168,7 +190,10 @@ function parseRequest(body: string): ServiceRequest | null {
     return null;
   }
   const input = parseHookInput(raw.input);
-  return input === null ? null : { config: raw.config as unknown as HookConfig, input };
+  const hostVersion = typeof raw.hostVersion === "string" ? raw.hostVersion : null;
+  return input === null
+    ? null
+    : { config: raw.config as unknown as HookConfig, input, hostVersion };
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

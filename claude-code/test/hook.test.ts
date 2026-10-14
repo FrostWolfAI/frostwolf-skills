@@ -24,7 +24,7 @@ function runAlone(
   return runHook({
     stdin: JSON.stringify({ session_id: "FW-TEST-SESSION-A", ...input }),
     env,
-    paths: () => ({ socket: join(dir, "absent.sock"), log: join(dir, "service.log") }),
+    paths: () => ({ socket: join(dir, "absent.sock"), log: join(dir, "service.log"), dataDir: dir }),
     serviceScript: null,
   });
 }
@@ -82,7 +82,7 @@ describe("runHook without a service", () => {
     const output = await runHook({
       stdin: "not json",
       env: {},
-      paths: () => ({ socket: join(dir, "absent.sock"), log: join(dir, "service.log") }),
+      paths: () => ({ socket: join(dir, "absent.sock"), log: join(dir, "service.log"), dataDir: dir }),
       serviceScript: null,
     });
 

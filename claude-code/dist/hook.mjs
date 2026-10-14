@@ -1,10 +1,31 @@
 // src/hook-main.ts
-import { dirname, join as join2 } from "path";
+import { dirname, join as join3 } from "path";
 import { fileURLToPath } from "url";
 
 // src/hook.ts
 import { spawn } from "child_process";
 import { request } from "http";
+
+// src/checkin.ts
+import { randomUUID } from "crypto";
+import { readFileSync, writeFileSync } from "fs";
+import { hostname, release } from "os";
+import { basename, join } from "path";
+
+// src/version.ts
+var PLUGIN_VERSION = "0.1.0";
+
+// src/checkin.ts
+var VERSION = /^\d+\.\d+\.\d+/;
+var AGENT_VERSION = /^claude-code_(\d+)-(\d+)-(\d+)/;
+function hostVersionOf(env) {
+  const fromPath = basename(env.CLAUDE_CODE_EXECPATH ?? "").match(VERSION)?.[0];
+  if (fromPath !== void 0) {
+    return fromPath;
+  }
+  const agent = env.AI_AGENT?.match(AGENT_VERSION);
+  return agent === null || agent === void 0 ? null : `${agent[1]}.${agent[2]}.${agent[3]}`;
+}
 
 // src/config.ts
 var PLUGIN_OPTION_PREFIX = "CLAUDE_PLUGIN_OPTION_";
@@ -202,7 +223,7 @@ async function runHook(options) {
     return await ask(
       paths,
       options.serviceScript,
-      { config, input },
+      { config, input, hostVersion: hostVersionOf(options.env) },
       DEADLINES_MS[input.hook_event_name]
     );
   } catch (error) {
@@ -294,7 +315,7 @@ function post(socket, payload, deadline) {
   });
 }
 function startServiceProcess(script, paths) {
-  const child = spawn(process.execPath, [script, paths.socket, paths.log], {
+  const child = spawn(process.execPath, [script, paths.socket, paths.log, paths.dataDir], {
     detached: true,
     stdio: "ignore"
   });
@@ -338,30 +359,31 @@ function describe(error) {
 import { createHash } from "crypto";
 import { lstatSync, mkdirSync } from "fs";
 import { homedir, tmpdir, userInfo } from "os";
-import { join } from "path";
+import { join as join2 } from "path";
 var MAX_SOCKET_PATH_BYTES = 100;
 var GROUP_AND_OTHER_BITS = 63;
 var OWNER_ONLY_DIR = 448;
 function runtimePaths(env, version) {
-  const dataDir = env.CLAUDE_PLUGIN_DATA ?? join(homedir(), ".frostwolf", "claude-code");
+  const dataDir = env.CLAUDE_PLUGIN_DATA ?? join2(homedir(), ".frostwolf", "claude-code");
   mkdirSync(dataDir, { recursive: true, mode: OWNER_ONLY_DIR });
-  const log = join(dataDir, "service.log");
+  const log = join2(dataDir, "service.log");
   const name = `service-${version}.sock`;
   if (process.platform === "win32") {
     const user = createHash("sha256").update(userInfo().username).digest("hex");
     return {
       socket: `\\\\.\\pipe\\frostwolf-claude-code-${version}-${user.slice(0, 16)}`,
-      log
+      log,
+      dataDir
     };
   }
-  const preferred = join(dataDir, name);
+  const preferred = join2(dataDir, name);
   if (Buffer.byteLength(preferred) <= MAX_SOCKET_PATH_BYTES) {
-    return { socket: preferred, log };
+    return { socket: preferred, log, dataDir };
   }
-  const fallback = join(tmpdir(), `frostwolf-${process.getuid?.() ?? "user"}`);
+  const fallback = join2(tmpdir(), `frostwolf-${process.getuid?.() ?? "user"}`);
   mkdirSync(fallback, { recursive: true, mode: OWNER_ONLY_DIR });
   assertPrivate(fallback);
-  return { socket: join(fallback, name), log };
+  return { socket: join2(fallback, name), log, dataDir };
 }
 function assertPrivate(dir) {
   const stat = lstatSync(dir);
@@ -373,11 +395,8 @@ function assertPrivate(dir) {
   }
 }
 
-// src/version.ts
-var PLUGIN_VERSION = "0.1.0";
-
 // src/hook-main.ts
-var SERVICE_SCRIPT = join2(dirname(fileURLToPath(import.meta.url)), "daemon.mjs");
+var SERVICE_SCRIPT = join3(dirname(fileURLToPath(import.meta.url)), "daemon.mjs");
 async function main() {
   const chunks = [];
   for await (const chunk of process.stdin) {

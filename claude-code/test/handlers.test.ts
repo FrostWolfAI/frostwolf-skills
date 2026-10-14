@@ -43,6 +43,7 @@ function run(input: Record<string, unknown>, config: HookConfig = CONFIG): Promi
   return handlers.handle({
     config,
     input: { session_id: SESSION, cwd: "/work/project", ...input } as unknown as HookInput,
+    hostVersion: null,
   });
 }
 
@@ -227,6 +228,7 @@ describe("PreToolUse", () => {
 
     const output = await handlers.handle({
       config: CONFIG,
+      hostVersion: null,
       input: {
         session_id: OTHER_SESSION,
         hook_event_name: "PreToolUse",

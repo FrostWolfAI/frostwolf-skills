@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { request } from "node:http";
+import { hostVersionOf } from "./checkin.js";
 import { configFromEnv, type HookConfig } from "./config.js";
 import { HEALTH_PATH, HOOK_PATH } from "./protocol.js";
 import { stringsOf } from "./leaves.js";
@@ -85,7 +86,7 @@ export async function runHook(
     return await ask(
       paths,
       options.serviceScript,
-      { config, input },
+      { config, input, hostVersion: hostVersionOf(options.env) },
       DEADLINES_MS[input.hook_event_name],
     );
   } catch (error) {
@@ -217,7 +218,7 @@ function post(
  * keeps running, and Claude Code is not left waiting on a pipe it holds open.
  */
 function startServiceProcess(script: string, paths: RuntimePaths): void {
-  const child = spawn(process.execPath, [script, paths.socket, paths.log], {
+  const child = spawn(process.execPath, [script, paths.socket, paths.log, paths.dataDir], {
     detached: true,
     stdio: "ignore",
   });

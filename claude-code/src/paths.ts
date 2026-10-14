@@ -3,10 +3,11 @@ import { lstatSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
-/** Where the local service listens and logs. */
+/** Where the local service listens, logs, and keeps its installation id. */
 export interface RuntimePaths {
   readonly socket: string;
   readonly log: string;
+  readonly dataDir: string;
 }
 
 /**
@@ -47,18 +48,19 @@ export function runtimePaths(
     return {
       socket: `\\\\.\\pipe\\frostwolf-claude-code-${version}-${user.slice(0, 16)}`,
       log,
+      dataDir,
     };
   }
 
   const preferred = join(dataDir, name);
   if (Buffer.byteLength(preferred) <= MAX_SOCKET_PATH_BYTES) {
-    return { socket: preferred, log };
+    return { socket: preferred, log, dataDir };
   }
 
   const fallback = join(tmpdir(), `frostwolf-${process.getuid?.() ?? "user"}`);
   mkdirSync(fallback, { recursive: true, mode: OWNER_ONLY_DIR });
   assertPrivate(fallback);
-  return { socket: join(fallback, name), log };
+  return { socket: join(fallback, name), log, dataDir };
 }
 
 function assertPrivate(dir: string): void {

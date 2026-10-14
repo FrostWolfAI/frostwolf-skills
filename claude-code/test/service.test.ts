@@ -7,6 +7,7 @@ import { runHook } from "../src/hook.js";
 import { tokensIn } from "../src/tokens.js";
 import type { HookOutput } from "../src/types.js";
 import { EMAIL, FakePlane } from "./fake-plane.js";
+import { PLUGIN_VERSION } from "../src/version.js";
 
 /** Permission bits that let anyone but the owner in. */
 const GROUP_AND_OTHER_BITS = 0o077;
@@ -20,7 +21,7 @@ beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "fw-svc-"));
   socket = join(dir, "s.sock");
   plane = new FakePlane();
-  service = await startService({ socket, fetch: plane.fetch });
+  service = await startService({ socket, fetch: plane.fetch, dataDir: dir });
 });
 
 afterEach(async () => {
@@ -31,8 +32,12 @@ afterEach(async () => {
 function hook(input: Record<string, unknown>): Promise<HookOutput | null> {
   return runHook({
     stdin: JSON.stringify({ session_id: "FW-TEST-SESSION-A", ...input }),
-    env: { FROSTWOLF_API_KEY: "fw-test-key", FROSTWOLF_ENDPOINT: "https://fake.frostwolf.test" },
-    paths: () => ({ socket, log: join(dir, "service.log") }),
+    env: {
+      FROSTWOLF_API_KEY: "fw-test-key",
+      FROSTWOLF_ENDPOINT: "https://fake.frostwolf.test",
+      CLAUDE_CODE_EXECPATH: "/opt/claude/versions/2.1.299",
+    },
+    paths: () => ({ socket, log: join(dir, "service.log"), dataDir: dir }),
     serviceScript: null,
   });
 }
@@ -71,4 +76,35 @@ describe("the local service", () => {
     expect(stdout).not.toContain(EMAIL);
     expect(specific(pre).updatedInput).toEqual({ file_path: "/work/out.csv", content: `ada,${EMAIL}` });
   });
+
+  it("checks in when a session starts, with device details and no payload", async () => {
+    await hook({ hook_event_name: "SessionStart", source: "startup" });
+    await hook({ hook_event_name: "SessionStart", source: "resume" });
+    await waitFor(() => plane.checkIns.length === 2);
+
+    const [first, second] = plane.checkIns;
+    expect(first?.headers.authorization).toBe("Bearer fw-test-key");
+    expect(first?.body).toMatchObject({
+      integration: "claude-code",
+      device: { os: process.platform, arch: process.arch },
+      versions: { client: PLUGIN_VERSION, host: "2.1.299", runtime: process.versions.node },
+    });
+    expect(second?.body.install_id).toBe(first?.body.install_id);
+  });
+
+  it("starts the session when the check-in fails", async () => {
+    plane.mode = "scan_down";
+    plane.refuseCheckIns = true;
+
+    const output = await hook({ hook_event_name: "SessionStart", source: "startup" });
+
+    expect(specific(output).additionalContext).toContain("Copy tokens exactly");
+  });
 });
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100 && !condition(); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(condition()).toBe(true);
+}

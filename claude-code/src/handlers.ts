@@ -74,14 +74,22 @@ type AttachedFinding =
  * A method may throw, and the hook process turns that into the event's
  * fail-closed answer.
  */
+/** Reports that a session started on this device. Never waited on. */
+export type CheckIn = (config: KeyedConfig, hostVersion: string | null) => void;
+
 export class Handlers {
   constructor(
     private readonly guards: GuardPool,
     private readonly sessions: Sessions,
+    private readonly checkIn: CheckIn = () => {},
     private readonly now: () => number = Date.now,
   ) {}
 
-  async handle({ config, input }: ServiceRequest): Promise<HookOutput | null> {
+  async handle({
+    config,
+    input,
+    hostVersion,
+  }: ServiceRequest): Promise<HookOutput | null> {
     if (input.hook_event_name === "SessionEnd") {
       return this.sessionEnd(config, input);
     }
@@ -97,6 +105,7 @@ export class Handlers {
 
     switch (input.hook_event_name) {
       case "SessionStart":
+        this.checkIn(keyed, hostVersion);
         return sessionContext(say.SESSION_GUIDE, null);
       case "UserPromptSubmit":
         return this.prompt(keyed, guard, session, context, input);

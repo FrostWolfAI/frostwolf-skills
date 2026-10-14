@@ -30,13 +30,27 @@ export interface ScanRecord {
   readonly body: Record<string, unknown>;
 }
 
+export interface CheckInRecord {
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body: Record<string, unknown>;
+}
+
 export class FakePlane {
   mode: PlaneMode = "answer";
+  refuseCheckIns = false;
   readonly scans: ScanRecord[] = [];
+  readonly checkIns: CheckInRecord[] = [];
 
   readonly fetch: FetchLike = async (url, init) => {
     const path = new URL(url).pathname;
     const body = init.body === undefined ? {} : (JSON.parse(init.body) as Record<string, unknown>);
+    if (path === "/v1/integrations/checkin") {
+      if (this.refuseCheckIns) {
+        return { ok: false, status: 503, text: async () => "{}" };
+      }
+      this.checkIns.push({ headers: init.headers, body });
+      return { ok: true, status: 204, text: async () => "" };
+    }
     const { status, json } = this.answer(path, body);
     return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(json) };
   };

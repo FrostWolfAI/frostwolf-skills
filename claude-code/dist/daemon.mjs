@@ -2,6 +2,75 @@
 import { appendFileSync, unlinkSync } from "fs";
 import { createServer, request } from "http";
 
+// src/checkin.ts
+import { randomUUID } from "crypto";
+import { readFileSync, writeFileSync } from "fs";
+import { hostname, release } from "os";
+import { basename, join } from "path";
+
+// src/version.ts
+var PLUGIN_VERSION = "0.1.0";
+
+// src/checkin.ts
+var INTEGRATION = "claude-code";
+var CHECKIN_PATH = "/v1/integrations/checkin";
+var DEFAULT_ENDPOINT = "https://api.frostwolf.app";
+var CHECKIN_TIMEOUT_MS = 5e3;
+var INSTALL_ID_FILE = "install-id";
+var INSTALL_ID = /^[A-Za-z0-9-]{8,64}$/;
+var OWNER_ONLY_FILE = 384;
+function installIdIn(dataDir) {
+  const file = join(dataDir, INSTALL_ID_FILE);
+  try {
+    const stored = readFileSync(file, "utf8").trim();
+    if (INSTALL_ID.test(stored)) {
+      return stored;
+    }
+  } catch {
+  }
+  const created = randomUUID();
+  writeFileSync(file, `${created}
+`, { mode: OWNER_ONLY_FILE });
+  return created;
+}
+function checkInBody(installId, hostVersion) {
+  return {
+    integration: INTEGRATION,
+    install_id: installId,
+    device: {
+      name: hostname(),
+      os: process.platform,
+      os_version: release(),
+      arch: process.arch
+    },
+    versions: {
+      client: PLUGIN_VERSION,
+      host: hostVersion,
+      runtime: process.versions.node
+    }
+  };
+}
+function sendCheckIn(deps, config, hostVersion) {
+  const run = async () => {
+    const endpoint = (config.endpoint ?? DEFAULT_ENDPOINT).replace(/\/+$/, "");
+    const response = await deps.fetch(`${endpoint}${CHECKIN_PATH}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.apiKey}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(checkInBody(deps.installId(), hostVersion)),
+      signal: AbortSignal.timeout(CHECKIN_TIMEOUT_MS)
+    });
+    if (!response.ok) {
+      throw new Error(`The check-in was refused with status ${response.status}.`);
+    }
+  };
+  run().catch((error) => {
+    deps.onError(error instanceof Error ? error : new Error(String(error)));
+  });
+}
+
 // src/handlers.ts
 import { homedir as homedir2 } from "os";
 
@@ -3279,7 +3348,7 @@ var TelemetryClient = class extends BatchTransport {
     super({ ...config, path: TELEMETRY_PATH });
   }
 };
-var DEFAULT_ENDPOINT = "https://api.frostwolf.app";
+var DEFAULT_ENDPOINT2 = "https://api.frostwolf.app";
 var DEFAULT_FLUSH_INTERVAL_MS = 5e3;
 var DEFAULT_MAX_BATCH_SIZE = 50;
 var DEFAULT_MAX_QUEUE_SIZE = 1e3;
@@ -3301,7 +3370,7 @@ var FrostWolfClient = class {
         "missing_api_key"
       );
     }
-    const endpoint = (options.endpoint ?? DEFAULT_ENDPOINT).replace(/\/+$/, "");
+    const endpoint = (options.endpoint ?? DEFAULT_ENDPOINT2).replace(/\/+$/, "");
     const fetchImpl = options.fetch ?? defaultFetch;
     const onError = options.onError ?? (() => {
     });
@@ -4054,15 +4123,22 @@ var WRITE_TOOLS = /* @__PURE__ */ new Set([
 ]);
 var CONTEXT_SCOPE = "claude-code";
 var Handlers = class {
-  constructor(guards, sessions, now = Date.now) {
+  constructor(guards, sessions, checkIn = () => {
+  }, now = Date.now) {
     this.guards = guards;
     this.sessions = sessions;
+    this.checkIn = checkIn;
     this.now = now;
   }
   guards;
   sessions;
+  checkIn;
   now;
-  async handle({ config, input }) {
+  async handle({
+    config,
+    input,
+    hostVersion
+  }) {
     if (input.hook_event_name === "SessionEnd") {
       return this.sessionEnd(config, input);
     }
@@ -4075,6 +4151,7 @@ var Handlers = class {
     const context = contextOf(input.session_id);
     switch (input.hook_event_name) {
       case "SessionStart":
+        this.checkIn(keyed, hostVersion);
         return sessionContext(SESSION_GUIDE, null);
       case "UserPromptSubmit":
         return this.prompt(keyed, guard, session, context, input);
@@ -4477,9 +4554,6 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-// src/version.ts
-var PLUGIN_VERSION = "0.1.0";
-
 // src/daemon.ts
 var MAX_REQUEST_BYTES = 64 * 1024 * 1024;
 var DEFAULT_IDLE_MS = 2 * 60 * 60 * 1e3;
@@ -4507,7 +4581,22 @@ async function startService(options) {
     onError: log,
     ...options.fetch === void 0 ? {} : { fetch: options.fetch }
   });
-  const handlers = new Handlers(guards, new Sessions());
+  const transport = options.fetch ?? ((url, init) => fetch(url, init));
+  const dataDir = options.dataDir;
+  let installId = null;
+  const handlers = new Handlers(
+    guards,
+    new Sessions(),
+    dataDir === void 0 ? void 0 : (config, hostVersion) => sendCheckIn(
+      {
+        fetch: transport,
+        installId: () => installId ??= installIdIn(dataDir),
+        onError: log
+      },
+      config,
+      hostVersion
+    )
+  );
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
   let idleTimer;
   let closing = null;
@@ -4582,7 +4671,8 @@ function parseRequest(body) {
     return null;
   }
   const input = parseHookInput(raw.input);
-  return input === null ? null : { config: raw.config, input };
+  const hostVersion = typeof raw.hostVersion === "string" ? raw.hostVersion : null;
+  return input === null ? null : { config: raw.config, input, hostVersion };
 }
 function readBody(req) {
   return new Promise((resolve2, reject) => {
@@ -4633,7 +4723,7 @@ function toError6(value) {
 
 // src/daemon-main.ts
 async function main() {
-  const [socket, log] = process.argv.slice(2);
+  const [socket, log, dataDir] = process.argv.slice(2);
   if (socket === void 0) {
     process.exitCode = 1;
     return;
@@ -4641,6 +4731,7 @@ async function main() {
   const service = await startService({
     socket,
     ...log === void 0 ? {} : { log },
+    ...dataDir === void 0 ? {} : { dataDir },
     onIdle: () => process.exit(0)
   });
   if (service === null) {
