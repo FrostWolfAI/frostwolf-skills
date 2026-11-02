@@ -91,8 +91,11 @@ export interface Replacement {
 
 /** How to check a list of texts. */
 export interface ProtectTextsOptions {
-  /** `sanitise` takes matched spans out; `block` leaves the texts for the caller to refuse. */
-  readonly onMatch: Extract<OnMatch, "block" | "sanitise">;
+  /**
+   * `sanitise` takes matched spans out; `block` and `allow` leave the texts for
+   * the caller to decide about. `allow` also cloaks a text an attack was found in.
+   */
+  readonly onMatch: OnMatch;
   /** Values to leave in the clear, because Claude already has them. */
   readonly keep?: (original: string) => boolean;
   /** What the model attack check may do. A signature match blocks whatever this says. */
@@ -298,10 +301,12 @@ export class AgentGuard {
 
     const unavailable = unavailableReason(result);
     const attack = result.attack;
+    // A model check in report mode leaves `blocked` alone, so its flag is read
+    // from the check itself.
     const found =
       attack !== null &&
-      attack.blocked &&
-      attack.reason !== SCAN_UNAVAILABLE_REASON;
+      attack.reason !== SCAN_UNAVAILABLE_REASON &&
+      (attack.blocked || attack.modelCheck?.verdict === "unsafe");
 
     if (result.openai === null) {
       return {
@@ -414,7 +419,12 @@ export function entityCounts(
 }
 
 function findingOf(attack: InspectionResult, removed: number): AttackFinding {
-  return { reason: attack.reason, severity: attack.severity, removed };
+  const model = attack.modelCheck;
+  return {
+    reason: attack.reason ?? model?.reasons[0] ?? null,
+    severity: attack.severity ?? model?.severity ?? null,
+    removed,
+  };
 }
 
 function withheld(attack: InspectionResult): boolean {

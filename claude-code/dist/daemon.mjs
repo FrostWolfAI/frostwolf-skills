@@ -9,7 +9,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.1";
+var PLUGIN_VERSION = "0.1.2";
 
 // src/checkin.ts
 var INTEGRATION = "claude-code";
@@ -3735,7 +3735,7 @@ var AgentGuard = class {
     });
     const unavailable = unavailableReason(result);
     const attack = result.attack;
-    const found = attack !== null && attack.blocked && attack.reason !== SCAN_UNAVAILABLE_REASON;
+    const found = attack !== null && attack.reason !== SCAN_UNAVAILABLE_REASON && (attack.blocked || attack.modelCheck?.verdict === "unsafe");
     if (result.openai === null) {
       return {
         ...untouched(originalTexts, unavailable),
@@ -3804,7 +3804,12 @@ function entityCounts(replaced, ignore = () => false) {
   return counts;
 }
 function findingOf(attack, removed) {
-  return { reason: attack.reason, severity: attack.severity, removed };
+  const model = attack.modelCheck;
+  return {
+    reason: attack.reason ?? model?.reasons[0] ?? null,
+    severity: attack.severity ?? model?.severity ?? null,
+    removed
+  };
 }
 function withheld(attack) {
   return attack.quota?.enforcementWithheld === true;
@@ -3973,8 +3978,8 @@ function describeEntities(entities) {
 function because(reason) {
   return reason === null ? "" : ` (${reason})`;
 }
-function promptAttack(attack) {
-  return `FrostWolf blocked this prompt as a likely prompt injection${because(attack.reason)}.`;
+function promptFlagged(attack) {
+  return `FrostWolf flagged this prompt as a possible prompt injection${because(attack.reason)} and recorded it. It was sent as typed.`;
 }
 function promptUnavailable(reason) {
   return `FrostWolf could not check this prompt (${reason}), so it was not sent. Try again in a moment. To send prompts unchecked while FrostWolf is unreachable, set on_unavailable to allow.`;
@@ -4138,6 +4143,7 @@ var WRITE_TOOLS = /* @__PURE__ */ new Set([
   "MultiEdit",
   "NotebookEdit"
 ]);
+var TYPED_PROMPT_ON_MATCH = "allow";
 var TYPED_PROMPT_SEMANTIC_PASS = "report";
 var CONTEXT_SCOPE = "claude-code";
 var Handlers = class {
@@ -4198,18 +4204,16 @@ var Handlers = class {
     const known = knownTo(input.cwd);
     const [outcome, attached] = await Promise.all([
       guard.protectTexts([input.prompt], context, {
-        onMatch: "block",
+        onMatch: TYPED_PROMPT_ON_MATCH,
         keep: known,
         semanticPass: TYPED_PROMPT_SEMANTIC_PASS
       }),
       attachedFiles(input.prompt, input.cwd)
     ]);
-    if (outcome.attack !== null) {
-      return blockPrompt(promptAttack(outcome.attack));
-    }
     if (outcome.unavailable !== null && config.onUnavailable === "block") {
       return blockPrompt(promptUnavailable(outcome.unavailable));
     }
+    const flagged = outcome.attack === null ? [] : [promptFlagged(outcome.attack)];
     const promptEntities = entityCounts(outcome.replaced, known);
     const fileFindings = (await Promise.all(
       attached.map((file) => this.checkAttached(config, guard, context, known, file))
@@ -4220,17 +4224,20 @@ var Handlers = class {
     ];
     const refusals = fileFindings.filter((f) => f.kind === "refuse").map((f) => f.message);
     if (data.length === 0 && refusals.length === 0) {
-      return null;
+      return flagged.length === 0 ? null : notice(flagged.join("\n"));
     }
     if (refusals.length === 0 && config.promptPersonalData === "warn") {
-      return notice(promptWarned(data));
+      return notice([promptWarned(data), ...flagged].join("\n"));
     }
     const base = promptEntities.size > 0 ? outcome.texts[0] ?? "" : input.prompt;
     return blockPrompt(
-      promptRefused([...data, ...refusals], withoutMentions(base, attached), {
-        prompt: promptEntities.size > 0,
-        attached: fileFindings.length > 0
-      })
+      [
+        ...flagged,
+        promptRefused([...data, ...refusals], withoutMentions(base, attached), {
+          prompt: promptEntities.size > 0,
+          attached: fileFindings.length > 0
+        })
+      ].join("\n\n")
     );
   }
   async checkAttached(config, guard, context, known, file) {

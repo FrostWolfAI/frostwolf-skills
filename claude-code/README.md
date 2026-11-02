@@ -40,7 +40,7 @@ for it instead, install from a Claude Code session:
 | `PostToolUse` | Replaces personal data and secrets in every tool result with tokens such as `[[email:f098b0367449]]`, and takes injected instructions out, before Claude sees the result. |
 | `PreToolUse` | Puts the real values back into a tool call, so a file Claude writes or a command it runs gets the original. Validates shell, web fetch, and MCP calls before they run. |
 | `PostToolBatch` | Checks every result exactly as Claude will receive it, and stops the turn before the next model call if one was not cloaked. |
-| `UserPromptSubmit` | Blocks prompt injection. Refuses a prompt that carries personal data, or attaches a file with `@` that does, and offers a version to send instead. |
+| `UserPromptSubmit` | Flags a prompt that looks like prompt injection, records it, and sends it as typed, because a prompt you type is you directing your own session. Refuses a prompt that carries personal data, or attaches a file with `@` that does or that carries an injection, and offers a version to send instead. |
 | `MessageDisplay` | Shows the real values on your screen. Claude keeps the tokens. |
 | `SessionEnd` | Erases the session's values. |
 

@@ -1,7 +1,7 @@
 {
   "name": "frostwolf",
   "displayName": "FrostWolf",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Cloak personal data and secrets before Claude sees them, and block prompt injection, in every Claude Code session.",
   "author": {
     "name": "FrostWolf",

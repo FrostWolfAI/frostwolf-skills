@@ -13,6 +13,8 @@ export const EMAIL = "FW-TEST-EMAIL-001";
 export const SECRET = "FW-TEST-SECRET-001";
 export const USER = "FW-TEST-USER-001";
 export const ATTACK = "FW-TEST-ATTACK-001";
+/** Text the fake model check flags, with no signature match. */
+export const MODEL_FLAG = "FW-TEST-MODEL-001";
 
 /** Mirrors the control plane's limit on one detection request. */
 const MAX_CLOAK_CHARS = 12_000;
@@ -81,8 +83,27 @@ export class FakePlane {
       ? validate(body.tool_calls as Array<{ name: string; arguments: string }>)
       : undefined;
 
-    const blocked = matches.length > 0 || toolValidation?.allowed === false;
-    const reason = matches[0]?.signature_id ?? (blocked ? "FW-TEST-001" : null);
+    // The model check runs only on a static miss, and refuses only when enforced.
+    const modelFlagged = matches.length === 0 && text.includes(MODEL_FLAG);
+    const modelEnforced = modelFlagged && body.semantic !== "report";
+    const modelCheck = modelFlagged
+      ? {
+          ran: true,
+          verdict: "unsafe",
+          reasons: ["FW-TEST-002"],
+          categories: [],
+          severity: "high",
+          latency_ms: 5,
+          truncated: false,
+          error: null,
+        }
+      : undefined;
+
+    const blocked =
+      matches.length > 0 || modelEnforced || toolValidation?.allowed === false;
+    const reason =
+      matches[0]?.signature_id ??
+      (modelEnforced ? "FW-TEST-002" : blocked ? "FW-TEST-001" : null);
 
     return {
       status: 200,
@@ -96,6 +117,7 @@ export class FakePlane {
         scanned_chars: text.length,
         signature_version: "test-1",
         ...(toolValidation === undefined ? {} : { tool_validation: toolValidation }),
+        ...(modelCheck === undefined ? {} : { model_check: modelCheck }),
         ...(body.cloak === undefined
           ? {}
           : { cloak: this.cloak(text, body.cloak as Record<string, unknown>, matches.length > 0) }),

@@ -33,8 +33,8 @@ function because(reason: string | null): string {
   return reason === null ? "" : ` (${reason})`;
 }
 
-export function promptAttack(attack: AttackFinding): string {
-  return `FrostWolf blocked this prompt as a likely prompt injection${because(attack.reason)}.`;
+export function promptFlagged(attack: AttackFinding): string {
+  return `FrostWolf flagged this prompt as a possible prompt injection${because(attack.reason)} and recorded it. It was sent as typed.`;
 }
 
 export function promptUnavailable(reason: string): string {

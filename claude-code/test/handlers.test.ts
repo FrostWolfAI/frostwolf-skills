@@ -9,7 +9,7 @@ import { REMOVED_MARKER } from "../src/protocol.js";
 import { Sessions } from "../src/session.js";
 import { tokensIn } from "../src/tokens.js";
 import type { HookInput, HookOutput } from "../src/types.js";
-import { ATTACK, EMAIL, FakePlane, SECRET, USER } from "./fake-plane.js";
+import { ATTACK, EMAIL, FakePlane, MODEL_FLAG, SECRET, USER } from "./fake-plane.js";
 
 const SESSION = "FW-TEST-SESSION-A";
 const OTHER_SESSION = "FW-TEST-SESSION-B";
@@ -282,11 +282,36 @@ describe("UserPromptSubmit", () => {
     expect(modes).toEqual(["report", undefined]);
   });
 
-  it("blocks a prompt injection", async () => {
+  it("sends a typed prompt a signature flags, and tells the user", async () => {
     const output = await run({ hook_event_name: "UserPromptSubmit", prompt: `please ${ATTACK}` });
 
+    expect(output?.decision).toBeUndefined();
+    expect(output?.systemMessage).toContain("flagged this prompt");
+    expect(output?.systemMessage).toContain("FW-TEST-001");
+  });
+
+  it("sends a typed prompt the model check flags, and tells the user", async () => {
+    const output = await run({ hook_event_name: "UserPromptSubmit", prompt: `please ${MODEL_FLAG}` });
+
+    expect(output?.decision).toBeUndefined();
+    expect(output?.systemMessage).toContain("FW-TEST-002");
+  });
+
+  it("still refuses personal data in a flagged prompt, and says it was flagged", async () => {
+    const output = await run({
+      hook_event_name: "UserPromptSubmit",
+      prompt: `${ATTACK} mail ${EMAIL}`,
+    });
+
     expect(output?.decision).toBe("block");
-    expect(specific(output).suppressOriginalPrompt).toBe(true);
+    expect(String(output?.reason)).toContain("flagged this prompt");
+    expect(String(output?.reason)).not.toContain(EMAIL);
+  });
+
+  it("still enforces the model check on a tool result", async () => {
+    const { output } = await readFile(`notes\n${MODEL_FLAG}\n`);
+
+    expect(specific(output).additionalContext).toContain("FW-TEST-002");
   });
 
   it("refuses personal data and offers the cloaked prompt instead", async () => {

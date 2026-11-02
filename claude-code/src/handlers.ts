@@ -56,15 +56,16 @@ const WRITE_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * What the model attack check does with a prompt the user typed.
+ * A prompt the user typed is never refused as an attack, only flagged.
  *
- * A typed prompt is the user directing their own session, and the model check
- * reads ordinary direction as an attack: "ignore that lint rule", "forget the
- * previous approach", "print the config". Refusing those makes the session
- * unusable, so the check only reports on a typed prompt, and a signature match
- * still refuses it. Injection that reaches Claude from somewhere else, a tool
- * result or a file attached with `@`, is still refused by either check.
+ * A typed prompt is the user directing their own session, and both checks read
+ * ordinary direction as an attack: "ignore that lint rule", "forget the previous
+ * approach", "dump the database schema". Refusing those breaks how people code,
+ * so the prompt is sent, the user is told, and the verdict is recorded with the
+ * scan like any other. Injection that reaches Claude from somewhere else, a tool
+ * result or a file attached with `@`, is still taken out or refused.
  */
+const TYPED_PROMPT_ON_MATCH = "allow";
 const TYPED_PROMPT_SEMANTIC_PASS = "report";
 
 /** Narrows each session's Cloak context to this integration. */
@@ -153,19 +154,17 @@ export class Handlers {
     const known = knownTo(input.cwd);
     const [outcome, attached] = await Promise.all([
       guard.protectTexts([input.prompt], context, {
-        onMatch: "block",
+        onMatch: TYPED_PROMPT_ON_MATCH,
         keep: known,
         semanticPass: TYPED_PROMPT_SEMANTIC_PASS,
       }),
       attachedFiles(input.prompt, input.cwd),
     ]);
 
-    if (outcome.attack !== null) {
-      return blockPrompt(say.promptAttack(outcome.attack));
-    }
     if (outcome.unavailable !== null && config.onUnavailable === "block") {
       return blockPrompt(say.promptUnavailable(outcome.unavailable));
     }
+    const flagged = outcome.attack === null ? [] : [say.promptFlagged(outcome.attack)];
 
     const promptEntities = entityCounts(outcome.replaced, known);
     const fileFindings = (
@@ -183,18 +182,21 @@ export class Handlers {
       .map((f) => f.message);
 
     if (data.length === 0 && refusals.length === 0) {
-      return null;
+      return flagged.length === 0 ? null : notice(flagged.join("\n"));
     }
     if (refusals.length === 0 && config.promptPersonalData === "warn") {
-      return notice(say.promptWarned(data));
+      return notice([say.promptWarned(data), ...flagged].join("\n"));
     }
 
     const base = promptEntities.size > 0 ? (outcome.texts[0] ?? "") : input.prompt;
     return blockPrompt(
-      say.promptRefused([...data, ...refusals], withoutMentions(base, attached), {
-        prompt: promptEntities.size > 0,
-        attached: fileFindings.length > 0,
-      }),
+      [
+        ...flagged,
+        say.promptRefused([...data, ...refusals], withoutMentions(base, attached), {
+          prompt: promptEntities.size > 0,
+          attached: fileFindings.length > 0,
+        }),
+      ].join("\n\n"),
     );
   }
 
