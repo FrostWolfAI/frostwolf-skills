@@ -12,6 +12,7 @@ import {
   type InspectionResult,
   type OnMatch,
   type ProtectResult,
+  type SemanticMode,
   type RestoreResult,
   type Severity,
   type ToolValidationResult,
@@ -88,6 +89,16 @@ export interface Replacement {
   readonly replacement: string;
 }
 
+/** How to check a list of texts. */
+export interface ProtectTextsOptions {
+  /** `sanitise` takes matched spans out; `block` leaves the texts for the caller to refuse. */
+  readonly onMatch: Extract<OnMatch, "block" | "sanitise">;
+  /** Values to leave in the clear, because Claude already has them. */
+  readonly keep?: (original: string) => boolean;
+  /** What the model attack check may do. A signature match blocks whatever this says. */
+  readonly semanticPass?: SemanticMode;
+}
+
 /** What checking a list of texts found and did. */
 export interface TextsOutcome {
   /** The texts with values tokenized and injected spans removed, in order. */
@@ -151,31 +162,33 @@ export class AgentGuard {
    * Check texts for attacks and personal data, and rewrite them.
    *
    * Texts longer than the detector accepts are split, and the pieces packed
-   * into as few requests as fit. `onMatch` decides what an attack does:
-   * `sanitise` takes the matched spans out, and `block` leaves the texts as
-   * they are for the caller to refuse.
+   * into as few requests as fit.
    */
   async protectTexts(
     texts: readonly string[],
     context: CloakContext,
-    onMatch: Extract<OnMatch, "block" | "sanitise">,
+    { onMatch, keep = () => false, semanticPass = "enforce" }: ProtectTextsOptions,
   ): Promise<TextsOutcome> {
     const pieces = piecesOf(texts, MAX_DETECT_CHARS);
     const batches = packPieces(pieces, MAX_DETECT_CHARS);
     const outcomes = await mapLimit(batches, MAX_PARALLEL_BATCHES, (batch) =>
-      this.checkCached(batch, context, onMatch),
+      this.checkCached(batch, context, onMatch, semanticPass),
     );
 
-    const rewritten = joinPieces(
-      pieces,
-      outcomes.flatMap((outcome) => outcome.texts),
-      texts.length,
+    const { texts: rewritten, replaced } = putBack(
+      joinPieces(
+        pieces,
+        outcomes.flatMap((outcome) => outcome.texts),
+        texts.length,
+      ),
+      outcomes.flatMap((outcome) => outcome.replaced),
+      keep,
     );
 
     return {
       texts: rewritten,
       changed: rewritten.some((text, index) => text !== texts[index]),
-      replaced: outcomes.flatMap((outcome) => outcome.replaced),
+      replaced,
       attack: strongest(outcomes.map((outcome) => outcome.attack)),
       unavailable:
         outcomes.find((outcome) => outcome.unavailable !== null)?.unavailable ??
@@ -217,6 +230,7 @@ export class AgentGuard {
     pieces: readonly Piece[],
     context: CloakContext,
     onMatch: OnMatch,
+    semanticPass: SemanticMode,
   ): Promise<BatchOutcome> {
     const key = createHash("sha256")
       .update(
@@ -224,6 +238,7 @@ export class AgentGuard {
           context.subject,
           context.scope ?? "",
           onMatch,
+          semanticPass,
           pieces.map((piece) => piece.text),
         ]),
       )
@@ -235,7 +250,7 @@ export class AgentGuard {
     }
     this.cache.delete(key);
 
-    const outcome = await this.checkBatch(pieces, context, onMatch);
+    const outcome = await this.checkBatch(pieces, context, onMatch, semanticPass);
 
     // An unchecked batch is never reused: the next attempt may get an answer.
     if (outcome.unavailable === null) {
@@ -259,6 +274,7 @@ export class AgentGuard {
     pieces: readonly Piece[],
     context: CloakContext,
     onMatch: OnMatch,
+    semanticPass: SemanticMode,
   ): Promise<BatchOutcome> {
     const originalTexts = pieces.map((piece) => piece.text);
 
@@ -276,6 +292,7 @@ export class AgentGuard {
         context,
         strategies: TOKENIZE_ALL,
         onUnavailable: this.config.onUnavailable,
+        semanticPass,
       },
     });
 
@@ -322,6 +339,32 @@ export class AgentGuard {
       unavailable,
     };
   }
+}
+
+/**
+ * Put back the values the caller says to keep.
+ *
+ * A token is derived from its value and context alone, so every occurrence of a
+ * kept value carries the same token and replacing the token restores them all.
+ * An injected span taken out is never put back.
+ */
+function putBack(
+  texts: readonly string[],
+  replaced: readonly Replacement[],
+  keep: (original: string) => boolean,
+): { readonly texts: readonly string[]; readonly replaced: readonly Replacement[] } {
+  const kept = replaced.filter(
+    (entry) => entry.type !== null && entry.replacement.length > 0 && keep(entry.original),
+  );
+  if (kept.length === 0) {
+    return { texts, replaced };
+  }
+
+  let restored = [...texts];
+  for (const entry of kept) {
+    restored = restored.map((text) => text.replaceAll(entry.replacement, entry.original));
+  }
+  return { texts: restored, replaced: replaced.filter((entry) => !kept.includes(entry)) };
 }
 
 /**

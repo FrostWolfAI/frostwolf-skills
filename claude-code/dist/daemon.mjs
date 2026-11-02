@@ -9,7 +9,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.0";
+var PLUGIN_VERSION = "0.1.1";
 
 // src/checkin.ts
 var INTEGRATION = "claude-code";
@@ -3638,27 +3638,29 @@ var AgentGuard = class {
    * Check texts for attacks and personal data, and rewrite them.
    *
    * Texts longer than the detector accepts are split, and the pieces packed
-   * into as few requests as fit. `onMatch` decides what an attack does:
-   * `sanitise` takes the matched spans out, and `block` leaves the texts as
-   * they are for the caller to refuse.
+   * into as few requests as fit.
    */
-  async protectTexts(texts, context, onMatch) {
+  async protectTexts(texts, context, { onMatch, keep = () => false, semanticPass = "enforce" }) {
     const pieces = piecesOf(texts, MAX_DETECT_CHARS);
     const batches = packPieces(pieces, MAX_DETECT_CHARS);
     const outcomes = await mapLimit(
       batches,
       MAX_PARALLEL_BATCHES,
-      (batch) => this.checkCached(batch, context, onMatch)
+      (batch) => this.checkCached(batch, context, onMatch, semanticPass)
     );
-    const rewritten = joinPieces(
-      pieces,
-      outcomes.flatMap((outcome) => outcome.texts),
-      texts.length
+    const { texts: rewritten, replaced } = putBack(
+      joinPieces(
+        pieces,
+        outcomes.flatMap((outcome) => outcome.texts),
+        texts.length
+      ),
+      outcomes.flatMap((outcome) => outcome.replaced),
+      keep
     );
     return {
       texts: rewritten,
       changed: rewritten.some((text, index) => text !== texts[index]),
-      replaced: outcomes.flatMap((outcome) => outcome.replaced),
+      replaced,
       attack: strongest(outcomes.map((outcome) => outcome.attack)),
       unavailable: outcomes.find((outcome) => outcome.unavailable !== null)?.unavailable ?? null
     };
@@ -3682,12 +3684,13 @@ var AgentGuard = class {
   close() {
     return this.client.close();
   }
-  async checkCached(pieces, context, onMatch) {
+  async checkCached(pieces, context, onMatch, semanticPass) {
     const key = createHash("sha256").update(
       JSON.stringify([
         context.subject,
         context.scope ?? "",
         onMatch,
+        semanticPass,
         pieces.map((piece) => piece.text)
       ])
     ).digest("hex");
@@ -3696,7 +3699,7 @@ var AgentGuard = class {
       return cached.outcome;
     }
     this.cache.delete(key);
-    const outcome = await this.checkBatch(pieces, context, onMatch);
+    const outcome = await this.checkBatch(pieces, context, onMatch, semanticPass);
     if (outcome.unavailable === null) {
       this.cache.set(key, {
         outcome,
@@ -3712,7 +3715,7 @@ var AgentGuard = class {
     }
     return outcome;
   }
-  async checkBatch(pieces, context, onMatch) {
+  async checkBatch(pieces, context, onMatch, semanticPass) {
     const originalTexts = pieces.map((piece) => piece.text);
     if (originalTexts.every((text) => text.length === 0)) {
       return untouched(originalTexts, null);
@@ -3726,7 +3729,8 @@ var AgentGuard = class {
       cloak: {
         context,
         strategies: TOKENIZE_ALL,
-        onUnavailable: this.config.onUnavailable
+        onUnavailable: this.config.onUnavailable,
+        semanticPass
       }
     });
     const unavailable = unavailableReason(result);
@@ -3762,6 +3766,19 @@ var AgentGuard = class {
     };
   }
 };
+function putBack(texts, replaced, keep) {
+  const kept = replaced.filter(
+    (entry) => entry.type !== null && entry.replacement.length > 0 && keep(entry.original)
+  );
+  if (kept.length === 0) {
+    return { texts, replaced };
+  }
+  let restored = [...texts];
+  for (const entry of kept) {
+    restored = restored.map((text) => text.replaceAll(entry.replacement, entry.original));
+  }
+  return { texts: restored, replaced: replaced.filter((entry) => !kept.includes(entry)) };
+}
 function unavailableReason(result) {
   if (result.attack?.reason === SCAN_UNAVAILABLE_REASON) {
     return SCAN_UNAVAILABLE_REASON;
@@ -4121,6 +4138,7 @@ var WRITE_TOOLS = /* @__PURE__ */ new Set([
   "MultiEdit",
   "NotebookEdit"
 ]);
+var TYPED_PROMPT_SEMANTIC_PASS = "report";
 var CONTEXT_SCOPE = "claude-code";
 var Handlers = class {
   constructor(guards, sessions, checkIn = () => {
@@ -4179,7 +4197,11 @@ var Handlers = class {
     session.addLiterals(tokensIn(input.prompt));
     const known = knownTo(input.cwd);
     const [outcome, attached] = await Promise.all([
-      guard.protectTexts([input.prompt], context, "block"),
+      guard.protectTexts([input.prompt], context, {
+        onMatch: "block",
+        keep: known,
+        semanticPass: TYPED_PROMPT_SEMANTIC_PASS
+      }),
       attachedFiles(input.prompt, input.cwd)
     ]);
     if (outcome.attack !== null) {
@@ -4216,7 +4238,10 @@ var Handlers = class {
     if (!("text" in file)) {
       return unchecked ? { kind: "refuse", message: attachedTooLarge(file.label) } : null;
     }
-    const outcome = await guard.protectTexts([file.text], context, "block");
+    const outcome = await guard.protectTexts([file.text], context, {
+      onMatch: "block",
+      keep: known
+    });
     if (outcome.attack !== null) {
       return { kind: "refuse", message: attachedAttack(file.label, outcome.attack) };
     }
@@ -4282,7 +4307,10 @@ var Handlers = class {
       throw error;
     }
     session.addLiterals(texts.flatMap(tokensIn));
-    const outcome = await guard.protectTexts(texts, context, "sanitise");
+    const outcome = await guard.protectTexts(texts, context, {
+      onMatch: "sanitise",
+      keep: knownTo(input.cwd)
+    });
     if (outcome.unavailable !== null && config.onUnavailable === "block") {
       session.records.set(
         input.tool_use_id,
@@ -4343,7 +4371,10 @@ var Handlers = class {
       }
       throw error;
     }
-    const outcome = await guard.protectTexts(texts, context, "sanitise");
+    const outcome = await guard.protectTexts(texts, context, {
+      onMatch: "sanitise",
+      keep: known
+    });
     if (outcome.unavailable !== null && config.onUnavailable === "block") {
       return couldNotCheck(call.tool_name, outcome.unavailable);
     }
@@ -4383,7 +4414,19 @@ function knownTo(cwd) {
   const paths = [cwd, homedir2()].filter(
     (path) => typeof path === "string" && path.length > 0
   );
-  return (original) => paths.some((path) => path.includes(original));
+  return (original) => original.length > 0 && paths.some((path) => holdsWhole(path, original));
+}
+var PATH_SEPARATORS = /* @__PURE__ */ new Set(["/", "\\", "-", "_", ".", " "]);
+function holdsWhole(path, value) {
+  for (let at = path.indexOf(value); at !== -1; at = path.indexOf(value, at + 1)) {
+    const before = at === 0 || PATH_SEPARATORS.has(path[at - 1]);
+    const end = at + value.length;
+    const after = end === path.length || PATH_SEPARATORS.has(path[end]);
+    if (before && after) {
+      return true;
+    }
+  }
+  return false;
 }
 function isValidated(tool) {
   return VALIDATED_TOOLS.has(tool) || tool.startsWith(MCP_TOOL_PREFIX);

@@ -55,6 +55,18 @@ const WRITE_TOOLS: ReadonlySet<string> = new Set([
   "NotebookEdit",
 ]);
 
+/**
+ * What the model attack check does with a prompt the user typed.
+ *
+ * A typed prompt is the user directing their own session, and the model check
+ * reads ordinary direction as an attack: "ignore that lint rule", "forget the
+ * previous approach", "print the config". Refusing those makes the session
+ * unusable, so the check only reports on a typed prompt, and a signature match
+ * still refuses it. Injection that reaches Claude from somewhere else, a tool
+ * result or a file attached with `@`, is still refused by either check.
+ */
+const TYPED_PROMPT_SEMANTIC_PASS = "report";
+
 /** Narrows each session's Cloak context to this integration. */
 const CONTEXT_SCOPE = "claude-code";
 
@@ -140,7 +152,11 @@ export class Handlers {
     session.addLiterals(tokensIn(input.prompt));
     const known = knownTo(input.cwd);
     const [outcome, attached] = await Promise.all([
-      guard.protectTexts([input.prompt], context, "block"),
+      guard.protectTexts([input.prompt], context, {
+        onMatch: "block",
+        keep: known,
+        semanticPass: TYPED_PROMPT_SEMANTIC_PASS,
+      }),
       attachedFiles(input.prompt, input.cwd),
     ]);
 
@@ -197,7 +213,10 @@ export class Handlers {
         : null;
     }
 
-    const outcome = await guard.protectTexts([file.text], context, "block");
+    const outcome = await guard.protectTexts([file.text], context, {
+      onMatch: "block",
+      keep: known,
+    });
 
     if (outcome.attack !== null) {
       return { kind: "refuse", message: say.attachedAttack(file.label, outcome.attack) };
@@ -294,7 +313,10 @@ export class Handlers {
     }
 
     session.addLiterals(texts.flatMap(tokensIn));
-    const outcome = await guard.protectTexts(texts, context, "sanitise");
+    const outcome = await guard.protectTexts(texts, context, {
+      onMatch: "sanitise",
+      keep: knownTo(input.cwd),
+    });
 
     if (outcome.unavailable !== null && config.onUnavailable === "block") {
       session.records.set(
@@ -376,7 +398,10 @@ export class Handlers {
       throw error;
     }
 
-    const outcome = await guard.protectTexts(texts, context, "sanitise");
+    const outcome = await guard.protectTexts(texts, context, {
+      onMatch: "sanitise",
+      keep: known,
+    });
 
     if (outcome.unavailable !== null && config.onUnavailable === "block") {
       return say.couldNotCheck(call.tool_name, outcome.unavailable);
@@ -432,16 +457,36 @@ function contextOf(sessionId: string): CloakContext {
 /**
  * Whether a value is one Claude already has.
  *
- * Claude Code gives Claude the working directory in every session, so a
- * username inside that path or the home directory is not new exposure. It is
- * still cloaked wherever it can be, but it does not refuse a prompt or stop a
- * turn on its own, which every error message naming a file would otherwise do.
+ * Claude Code gives Claude the working directory in every session, so a value
+ * that is part of that path or the home directory is not new exposure. It is
+ * left in the clear: cloaking it hides nothing and breaks every path Claude
+ * reads back. It also does not refuse a prompt or stop a turn, which every
+ * error message naming a file would otherwise do.
+ *
+ * A value counts only when it sits between path separators, so a name that
+ * happens to be the start of a directory name is still cloaked.
  */
 function knownTo(cwd: string | undefined): (original: string) => boolean {
   const paths = [cwd, homedir()].filter(
     (path): path is string => typeof path === "string" && path.length > 0,
   );
-  return (original) => paths.some((path) => path.includes(original));
+  return (original) =>
+    original.length > 0 && paths.some((path) => holdsWhole(path, original));
+}
+
+/** Characters that separate the words of a path. */
+const PATH_SEPARATORS: ReadonlySet<string> = new Set(["/", "\\", "-", "_", ".", " "]);
+
+function holdsWhole(path: string, value: string): boolean {
+  for (let at = path.indexOf(value); at !== -1; at = path.indexOf(value, at + 1)) {
+    const before = at === 0 || PATH_SEPARATORS.has(path[at - 1] as string);
+    const end = at + value.length;
+    const after = end === path.length || PATH_SEPARATORS.has(path[end] as string);
+    if (before && after) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isValidated(tool: string): boolean {

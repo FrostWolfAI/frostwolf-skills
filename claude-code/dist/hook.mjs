@@ -13,7 +13,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.0";
+var PLUGIN_VERSION = "0.1.1";
 
 // src/checkin.ts
 var VERSION = /^\d+\.\d+\.\d+/;

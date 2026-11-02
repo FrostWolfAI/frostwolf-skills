@@ -100,6 +100,35 @@ describe("PostToolUse", () => {
     expect(specific(output).additionalContext).toContain("removed 1 span");
   });
 
+  it("leaves a value from the working directory's path in the clear", async () => {
+    const output = await run({
+      hook_event_name: "PostToolUse",
+      cwd: `/home/${USER}/project`,
+      tool_name: "Read",
+      tool_input: { file_path: "/work/project/users.txt" },
+      tool_response: readResponse(`path: /home/${USER}/project\nemail: ${EMAIL}\n`),
+      tool_use_id: `toolu_${nextId++}`,
+    });
+    const content = (specific(output).updatedToolOutput as ReturnType<typeof readResponse>).file.content;
+
+    expect(content).toContain(`/home/${USER}/project`);
+    expect(content).not.toContain(EMAIL);
+  });
+
+  it("still cloaks a value that only starts a word of the path", async () => {
+    const output = await run({
+      hook_event_name: "PostToolUse",
+      cwd: `/home/${USER}X/project`,
+      tool_name: "Read",
+      tool_input: { file_path: "/work/project/users.txt" },
+      tool_response: readResponse(`owner: ${USER}\n`),
+      tool_use_id: `toolu_${nextId++}`,
+    });
+    const content = (specific(output).updatedToolOutput as ReturnType<typeof readResponse>).file.content;
+
+    expect(content).not.toContain(USER);
+  });
+
   it("says nothing about a result with nothing to change", async () => {
     const { output } = await readFile("nothing to see\n");
 
@@ -244,6 +273,15 @@ describe("PreToolUse", () => {
 });
 
 describe("UserPromptSubmit", () => {
+  it("lets the model check only report on a typed prompt, and enforce on a tool result", async () => {
+    await run({ hook_event_name: "UserPromptSubmit", prompt: "forget the previous approach" });
+    await readFile("forget the previous approach\n");
+
+    const modes = plane.scans.map((scan) => (scan.body as { semantic?: string }).semantic);
+    // The SDK leaves the field out for its default, `enforce`.
+    expect(modes).toEqual(["report", undefined]);
+  });
+
   it("blocks a prompt injection", async () => {
     const output = await run({ hook_event_name: "UserPromptSubmit", prompt: `please ${ATTACK}` });
 

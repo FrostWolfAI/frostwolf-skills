@@ -41,7 +41,7 @@ for it instead, install from a Claude Code session:
 | `PreToolUse` | Puts the real values back into a tool call, so a file Claude writes or a command it runs gets the original. Validates shell, web fetch, and MCP calls before they run. |
 | `PostToolBatch` | Checks every result exactly as Claude will receive it, and stops the turn before the next model call if one was not cloaked. |
 | `UserPromptSubmit` | Blocks prompt injection. Refuses a prompt that carries personal data, or attaches a file with `@` that does, and offers a version to send instead. |
-| `MessageDisplay` | Shows the real values on your screen. Claude and the transcript keep the tokens. |
+| `MessageDisplay` | Shows the real values on your screen. Claude keeps the tokens. |
 | `SessionEnd` | Erases the session's values. |
 
 ## Settings
@@ -80,7 +80,17 @@ Each hook runs as a short-lived Node process. Tokens must stay restorable
 across all of them, so the first hook starts a small local service that holds
 the values in memory. It listens on a socket only your account can open, under
 Claude Code's plugin data directory, and exits after two hours without
-activity. Values never touch disk.
+activity. The service never writes a value to disk.
+
+Claude Code itself does. It records every hook's output in the session
+transcript under `~/.claude/projects`, and a tool call FrostWolf restored
+carries the real values, so they appear there in the restored call. What Claude
+read stays tokenized in the transcript, as Claude saw it.
+
+A value that is part of the working directory or your home directory, such as
+your username in a path, is left in the clear. Claude Code already gives Claude
+the working directory, so cloaking it would hide nothing and break every path
+Claude reads back.
 
 When a session starts, the plugin checks in with the device's name, operating
 system and architecture, and the plugin, Claude Code, and Node.js versions,
