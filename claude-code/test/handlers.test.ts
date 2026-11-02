@@ -74,6 +74,41 @@ async function readFile(content: string, config: HookConfig = CONFIG) {
   return { id, output, updated, content: updated?.file.content };
 }
 
+describe("telemetry", () => {
+  it("names the plugin, its versions, and the installation on every event", async () => {
+    const sourced = new GuardPool(
+      { fetch: plane.fetch, onError: (error) => errors.push(error) },
+      (hostVersion) => ({
+        integration: "claude-code",
+        installId: "FW-TEST-INSTALL-001",
+        clientVersion: "9.9.9",
+        ...(hostVersion === null ? {} : { hostVersion }),
+      }),
+    );
+    const sourcedHandlers = new Handlers(sourced, new Sessions());
+
+    await sourcedHandlers.handle({
+      config: CONFIG,
+      input: {
+        session_id: SESSION,
+        cwd: "/work/project",
+        hook_event_name: "UserPromptSubmit",
+        prompt: "hello",
+      } as unknown as HookInput,
+      hostVersion: "2.1.316",
+    });
+    await sourced.closeAll();
+
+    expect(plane.telemetry.length).toBeGreaterThan(0);
+    expect(plane.telemetry[0]?.source).toEqual({
+      integration: "claude-code",
+      installId: "FW-TEST-INSTALL-001",
+      clientVersion: "9.9.9",
+      hostVersion: "2.1.316",
+    });
+  });
+});
+
 describe("PostToolUse", () => {
   it("cloaks personal data in a tool result and keeps its shape", async () => {
     const { updated, content } = await readFile(`name: ada\nemail: ${EMAIL}\n`);

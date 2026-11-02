@@ -1,7 +1,7 @@
 import { appendFileSync, unlinkSync } from "node:fs";
 import { createServer, request, type IncomingMessage, type Server } from "node:http";
 import type { FetchLike } from "@frostwolfai/sdk";
-import { installIdIn, sendCheckIn } from "./checkin.js";
+import { INTEGRATION, installIdIn, sendCheckIn } from "./checkin.js";
 import { Handlers } from "./handlers.js";
 import { GuardPool } from "./pool.js";
 import { HEALTH_PATH, HOOK_PATH } from "./protocol.js";
@@ -80,14 +80,22 @@ export async function startService(
     }
   };
 
-  const guards = new GuardPool({
-    onError: log,
-    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-  });
-  const transport: FetchLike =
-    options.fetch ?? ((url, init) => fetch(url, init as RequestInit));
   const dataDir = options.dataDir;
   let installId: string | null = null;
+  const guards = new GuardPool(
+    {
+      onError: log,
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    },
+    (hostVersion) => ({
+      integration: INTEGRATION,
+      clientVersion: PLUGIN_VERSION,
+      ...(hostVersion === null ? {} : { hostVersion }),
+      ...(dataDir === undefined ? {} : { installId: (installId ??= installIdIn(dataDir)) }),
+    }),
+  );
+  const transport: FetchLike =
+    options.fetch ?? ((url, init) => fetch(url, init as RequestInit));
   const handlers = new Handlers(
     guards,
     new Sessions(),

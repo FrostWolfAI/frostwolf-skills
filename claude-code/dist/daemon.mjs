@@ -9,7 +9,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.3";
+var PLUGIN_VERSION = "0.1.4";
 
 // src/checkin.ts
 var INTEGRATION = "claude-code";
@@ -154,7 +154,7 @@ var RestoreDeniedError = class extends FrostWolfError {
   }
 };
 var SDK_NAME = "@frostwolfai/sdk";
-var SDK_VERSION = "0.7.7";
+var SDK_VERSION = "0.7.10";
 var BatchTransport = class {
   config;
   queue = [];
@@ -286,6 +286,10 @@ var ENTITY_TYPES = [
   "secret",
   "recovery_code"
 ];
+var CUSTOM_ENTITY_TYPE_PATTERN = /^x_[a-z_]{1,38}$/;
+function isCustomEntityType(value) {
+  return CUSTOM_ENTITY_TYPE_PATTERN.test(value);
+}
 var ENTITY_CATEGORIES = ["pii", "phi", "pci", "credential"];
 var SCAN_PATH = "/v1/scan";
 var CLOAK_PATH = "/v1/cloak/detect";
@@ -551,7 +555,7 @@ function parseCloakEntity(value, index) {
   const label = `cloak.entities[${index}]`;
   const record = asRecord(value, label);
   const type = asString(record.type, `${label}.type`);
-  if (!ENTITY_TYPES.includes(type)) {
+  if (!ENTITY_TYPES.includes(type) && !isCustomEntityType(type)) {
     throw invalid(`Unknown entity type "${type}".`);
   }
   const category = asString(record.category, `${label}.category`);
@@ -985,7 +989,10 @@ function mayTokenize(options) {
   const types = options.entities ?? ENTITY_TYPES;
   return types.some(
     (type) => resolveStrategy(
-      { type, category: CATEGORY_OF_TYPE[type] },
+      {
+        type,
+        category: isCustomEntityType(type) ? "pii" : CATEGORY_OF_TYPE[type]
+      },
       options.strategies
     ).name === "tokenize"
   );
@@ -1013,8 +1020,8 @@ function validateStrategies(strategies) {
   const known = [...ENTITY_TYPES, ...ENTITY_CATEGORIES];
   const names = ["tokenize", "hash", "mask", "redact"];
   for (const [key, spec] of Object.entries(strategies)) {
-    if (!known.includes(key)) {
-      throw invalid2(`\`${key}\` is not an entity type or category.`);
+    if (!known.includes(key) && !isCustomEntityType(key)) {
+      throw invalid2(`\`${key}\` is not an entity type, a custom type (x_...), or a category.`);
     }
     if (spec === void 0) {
       continue;
@@ -1803,6 +1810,190 @@ function editPlan(plan, edits) {
   }
   return { system, messages, redacted };
 }
+var PARTIAL_TOKEN = /\[(?:\[(?:[a-z_]{1,40}(?::[0-9a-f]{0,64}\]?)?)?)?$/;
+var KEEPALIVE_TYPES = /* @__PURE__ */ new Set(["ping"]);
+function splitHeld(text) {
+  const match = PARTIAL_TOKEN.exec(text);
+  if (match === null) {
+    return [text, ""];
+  }
+  return [text.slice(0, match.index), text.slice(match.index)];
+}
+function deltaSlotsOf(chunk) {
+  if (!isRecord(chunk)) {
+    return [];
+  }
+  const slots = [];
+  const type = chunk.type;
+  if (type === "content_block_delta" && isRecord(chunk.delta)) {
+    const index = String(chunk.index ?? 0);
+    for (const field of ["text", "partial_json"]) {
+      if (typeof chunk.delta[field] === "string") {
+        slots.push({ channel: `block:${index}`, path: ["delta", field] });
+      }
+    }
+    return slots;
+  }
+  if (typeof type === "string" && type.endsWith(".delta") && typeof chunk.delta === "string") {
+    const item = String(chunk.item_id ?? chunk.output_index ?? 0);
+    const part = String(chunk.content_index ?? 0);
+    return [{ channel: `${type}:${item}:${part}`, path: ["delta"] }];
+  }
+  const choices = chunk.choices;
+  if (Array.isArray(choices)) {
+    choices.forEach((choice, position) => {
+      if (!isRecord(choice)) {
+        return;
+      }
+      const index = String(choice.index ?? position);
+      const base = ["choices", position];
+      if (typeof choice.text === "string") {
+        slots.push({ channel: `choice:${index}:text`, path: [...base, "text"] });
+      }
+      const delta = choice.delta;
+      if (!isRecord(delta)) {
+        return;
+      }
+      for (const field of ["content", "refusal"]) {
+        if (typeof delta[field] === "string") {
+          slots.push({
+            channel: `choice:${index}:${field}`,
+            path: [...base, "delta", field]
+          });
+        }
+      }
+      const calls = delta.tool_calls;
+      if (Array.isArray(calls)) {
+        calls.forEach((call, at) => {
+          const fn = isRecord(call) ? call.function : void 0;
+          if (isRecord(fn) && typeof fn.arguments === "string") {
+            const tool = String(call.index ?? at);
+            slots.push({
+              channel: `choice:${index}:tool:${tool}`,
+              path: [...base, "delta", "tool_calls", at, "function", "arguments"]
+            });
+          }
+        });
+      }
+    });
+    return slots;
+  }
+  const candidates = chunk.candidates;
+  if (Array.isArray(candidates)) {
+    candidates.forEach((candidate, position) => {
+      const parts = isRecord(candidate) && isRecord(candidate.content) ? candidate.content.parts : void 0;
+      if (!Array.isArray(parts)) {
+        return;
+      }
+      const index = String(candidate.index ?? position);
+      parts.forEach((part, at) => {
+        if (isRecord(part) && typeof part.text === "string") {
+          slots.push({
+            channel: `candidate:${index}`,
+            path: ["candidates", position, "content", "parts", at, "text"]
+          });
+        }
+      });
+    });
+  }
+  return slots;
+}
+async function* restoreStream(stream, deps) {
+  const held = /* @__PURE__ */ new Map();
+  const last = /* @__PURE__ */ new Map();
+  const totals = { restored: 0, unknown: 0, denied: 0 };
+  let reported = false;
+  const report = () => {
+    if (!reported) {
+      reported = true;
+      deps.report(totals.restored, totals.unknown, totals.denied);
+    }
+  };
+  const count = (done) => {
+    totals.restored += done.restored;
+    totals.unknown += done.unknown;
+    totals.denied += done.denied;
+    if (done.denied > 0 && deps.onDenied === "throw") {
+      report();
+      throw new RestoreDeniedError(totals.denied);
+    }
+  };
+  async function* release2() {
+    for (const [channel, tail] of held) {
+      held.delete(channel);
+      const source = last.get(channel);
+      if (tail.length === 0 || source === void 0) {
+        continue;
+      }
+      const done = await deps.restoreText(tail);
+      count(done);
+      let copy = source.chunk;
+      for (const other of deltaSlotsOf(copy)) {
+        copy = setAt(copy, other.path, "");
+      }
+      yield setAt(copy, source.slot.path, done.text);
+    }
+  }
+  try {
+    for await (const chunk of stream) {
+      const slots = deltaSlotsOf(chunk);
+      if (slots.length === 0) {
+        const type = isRecord(chunk) ? chunk.type : void 0;
+        if (typeof type !== "string" || !KEEPALIVE_TYPES.has(type)) {
+          yield* release2();
+        }
+        const whole = await deps.restoreValue(chunk);
+        count(whole);
+        yield whole.value;
+        continue;
+      }
+      let out = chunk;
+      for (const slot of slots) {
+        const text = `${held.get(slot.channel) ?? ""}${String(getAt(chunk, slot.path))}`;
+        const [now, later] = splitHeld(text);
+        held.set(slot.channel, later);
+        last.set(slot.channel, { chunk, slot });
+        const done = await deps.restoreText(now);
+        count(done);
+        out = setAt(out, slot.path, done.text);
+      }
+      yield out;
+    }
+    yield* release2();
+  } finally {
+    report();
+  }
+}
+function getAt(root, path) {
+  let node = root;
+  for (const key of path) {
+    if (node === null || typeof node !== "object") {
+      return void 0;
+    }
+    node = node[key];
+  }
+  return node;
+}
+function setAt(root, path, value, depth = 0) {
+  if (depth === path.length) {
+    return value;
+  }
+  const key = path[depth];
+  if (Array.isArray(root)) {
+    const list = [...root];
+    list[key] = setAt(list[key], path, value, depth + 1);
+    return list;
+  }
+  const record = Object.assign(
+    Object.create(Object.getPrototypeOf(root ?? {})),
+    root
+  );
+  record[key] = setAt(record[key], path, value, depth + 1);
+  return record;
+}
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 var NO_ATTACK_CHECK_VERSION = "disabled";
 function detectOptionsFor(options, action) {
   return {
@@ -1828,8 +2019,10 @@ function assertCloakOptions(options) {
     throw invalid3("`minConfidence` must be a number between 0 and 1.");
   }
   for (const type of options.entities ?? []) {
-    if (!ENTITY_TYPES.includes(type)) {
-      throw invalid3(`\`${String(type)}\` is not an entity type.`);
+    if (!ENTITY_TYPES.includes(type) && !isCustomEntityType(type)) {
+      throw invalid3(
+        `\`${String(type)}\` is not an entity type or a custom type (x_...).`
+      );
     }
   }
   if (options.entities !== void 0 && options.entities.length === 0) {
@@ -1972,6 +2165,39 @@ var CloakNamespace = class {
     this.reportRestore(result.restored, result.unknown, result.denied);
     return result;
   }
+  /**
+   * Put the original values back into a stream of provider chunks, as it
+   * passes.
+   *
+   * Takes the stream a provider SDK returned and yields the same chunks with
+   * their text restored, so an end user watching the reply sees the values and
+   * never a token. A token split across two chunks is held back until it is
+   * whole, which delays only those few characters. Understands the OpenAI Chat
+   * Completions and Responses, Anthropic Messages, and Gemini stream layouts,
+   * and restores any other chunk whole.
+   */
+  restoreStream(stream, options) {
+    return restoreStream(stream, this.streamDeps(options));
+  }
+  /**
+   * What restoring a stream needs, bound to one context.
+   *
+   * Every piece is restored with denial left to the stream, which refuses as
+   * `restore` does but reports one set of totals for the whole stream rather
+   * than one event per chunk.
+   */
+  streamDeps(options) {
+    const engine = this.config.engine;
+    return {
+      restoreText: async (text) => {
+        const done = await engine.restore(text, options.context, "leave");
+        return { ...done, text: done.value };
+      },
+      restoreValue: (value) => engine.restore(value, options.context, "leave"),
+      onDenied: options.onDenied ?? "throw",
+      report: (restored, unknown, denied) => this.reportRestore(restored, unknown, denied)
+    };
+  }
   /** Emit the counts for one restore. Never a token or a value. */
   reportRestore(restored, unknown, denied) {
     this.config.emit(
@@ -2067,37 +2293,149 @@ function collectBlock(block, base, found) {
     collectStrings(input, [...base, "input"], 0, found);
   }
 }
+var REQUEST_FIELDS = [
+  "system",
+  "instructions",
+  "systemInstruction",
+  "system_instruction",
+  "messages",
+  "input",
+  "prompt",
+  "contents"
+];
+function isRecognisedRequest(request2) {
+  if (REQUEST_FIELDS.some((field) => request2[field] !== void 0)) {
+    return true;
+  }
+  const config = request2.config;
+  return isPlainObject2(config) && config.systemInstruction !== void 0;
+}
+function collectField(value, base, found) {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index++) {
+      collectBlock(value[index], [...base, index], found);
+    }
+    return;
+  }
+  collectBlock(value, base, found);
+}
+function collectMessage(message, base, found) {
+  if (typeof message === "string") {
+    collectBlock(message, base, found);
+    return;
+  }
+  if (!isPlainObject2(message)) {
+    return;
+  }
+  const content = message.content;
+  if (typeof content === "string") {
+    collectBlock(content, [...base, "content"], found);
+  } else if (Array.isArray(content)) {
+    collectField(content, [...base, "content"], found);
+  }
+  for (const field of ["arguments", "output"]) {
+    const value = message[field];
+    if (typeof value === "string" && value.length > 0) {
+      found.push({ text: value, path: [...base, field] });
+    }
+  }
+  const calls = message.tool_calls;
+  if (Array.isArray(calls)) {
+    for (let index = 0; index < calls.length; index++) {
+      const fn = calls[index]?.function;
+      const args = isPlainObject2(fn) ? fn.arguments : void 0;
+      if (typeof args === "string" && args.length > 0) {
+        found.push({
+          text: args,
+          path: [...base, "tool_calls", index, "function", "arguments"]
+        });
+      }
+    }
+  }
+}
+function collectGemini(value, base, found) {
+  if (typeof value === "string") {
+    collectBlock(value, base, found);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index++) {
+      collectGemini(value[index], [...base, index], found);
+    }
+    return;
+  }
+  if (!isPlainObject2(value)) {
+    return;
+  }
+  const parts = value.parts;
+  if (!Array.isArray(parts)) {
+    collectBlock(value, base, found);
+    return;
+  }
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index];
+    const at = [...base, "parts", index];
+    if (typeof part === "string") {
+      collectBlock(part, at, found);
+      continue;
+    }
+    if (!isPlainObject2(part)) {
+      continue;
+    }
+    if (typeof part.text === "string" && part.text.length > 0) {
+      found.push({ text: part.text, path: [...at, "text"] });
+    }
+    const call = part.functionCall;
+    if (isPlainObject2(call) && isPlainObject2(call.args)) {
+      collectStrings(call.args, [...at, "functionCall", "args"], 0, found);
+    }
+    const reply = part.functionResponse;
+    if (isPlainObject2(reply) && isPlainObject2(reply.response)) {
+      collectStrings(
+        reply.response,
+        [...at, "functionResponse", "response"],
+        0,
+        found
+      );
+    }
+  }
+}
 function collect(request2) {
   const found = [];
-  const system = request2.system;
-  if (typeof system === "string") {
-    if (system.length > 0) {
-      found.push({ text: system, path: ["system"] });
-    }
-  } else if (Array.isArray(system)) {
-    for (let index = 0; index < system.length; index++) {
-      collectBlock(system[index], ["system", index], found);
+  if (request2.system !== void 0) {
+    collectField(request2.system, ["system"], found);
+  }
+  if (typeof request2.instructions === "string") {
+    collectBlock(request2.instructions, ["instructions"], found);
+  }
+  for (const field of ["systemInstruction", "system_instruction"]) {
+    if (request2[field] !== void 0) {
+      collectGemini(request2[field], [field], found);
     }
   }
-  const messages = request2.messages;
-  if (!Array.isArray(messages)) {
-    return found;
+  const config = request2.config;
+  if (isPlainObject2(config) && config.systemInstruction !== void 0) {
+    collectGemini(
+      config.systemInstruction,
+      ["config", "systemInstruction"],
+      found
+    );
   }
-  for (let index = 0; index < messages.length; index++) {
-    const content = messages[index]?.content;
-    const base = ["messages", index, "content"];
-    if (typeof content === "string") {
-      if (content.length > 0) {
-        found.push({ text: content, path: base });
+  for (const field of ["messages", "input"]) {
+    const value = request2[field];
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index++) {
+        collectMessage(value[index], [field, index], found);
       }
-      continue;
+    } else if (typeof value === "string") {
+      collectBlock(value, [field], found);
     }
-    if (!Array.isArray(content)) {
-      continue;
-    }
-    for (let part = 0; part < content.length; part++) {
-      collectBlock(content[part], [...base, part], found);
-    }
+  }
+  if (request2.prompt !== void 0) {
+    collectField(request2.prompt, ["prompt"], found);
+  }
+  if (request2.contents !== void 0) {
+    collectGemini(request2.contents, ["contents"], found);
   }
   return found;
 }
@@ -2166,7 +2504,7 @@ async function* teeStream(stream, onChunk, onDone) {
     onDone();
   }
 }
-function tapStream(stream, onChunk, onDone) {
+function tapStream(stream, onChunk, onDone, restore) {
   let settled = false;
   let proxy;
   const settle = (final) => {
@@ -2177,20 +2515,34 @@ function tapStream(stream, onChunk, onDone) {
     onDone(final);
   };
   const teed = teeStream(stream, onChunk, () => settle(void 0));
+  const iterated = restore === void 0 ? teed : restoreStream(teed, restore);
   proxy = new Proxy(stream, {
     get(target, property) {
       if (property === Symbol.asyncIterator) {
-        return () => teed;
+        return () => iterated;
       }
       const value = Reflect.get(target, property, target);
       if (typeof value !== "function") {
         return value;
       }
-      if (property === "finalMessage") {
+      if (property === "finalMessage" || property === "finalText") {
         return async () => {
-          const message = await value.call(target);
-          settle(message);
-          return message;
+          const result = await value.call(target);
+          if (property === "finalMessage") {
+            settle(result);
+          }
+          return restore === void 0 ? result : restoreWhole(result, restore);
+        };
+      }
+      if (restore !== void 0 && (property === "on" || property === "once" || property === "addListener")) {
+        return (event, listener) => {
+          const wrapped = restoringListener(target, event, listener, restore);
+          value.call(
+            target,
+            event,
+            wrapped
+          );
+          return proxy;
         };
       }
       return (...methodArgs) => {
@@ -2203,6 +2555,76 @@ function tapStream(stream, onChunk, onDone) {
     }
   });
   return proxy;
+}
+async function restoreWhole(value, restore) {
+  const done = await restore.restoreValue(value);
+  restore.report(done.restored, done.unknown, done.denied);
+  if (done.denied > 0 && restore.onDenied === "throw") {
+    throw new RestoreDeniedError(done.denied);
+  }
+  return done.value;
+}
+var WHOLE_VALUE_EVENTS = /* @__PURE__ */ new Set([
+  "message",
+  "finalMessage",
+  "contentBlock",
+  "streamEvent"
+]);
+function restoringListener(target, event, listener, restore) {
+  let chain = Promise.resolve();
+  const queue = (step) => {
+    chain = chain.then(step).catch(() => void 0);
+  };
+  const deny = (denied) => {
+    if (denied === 0 || restore.onDenied !== "throw") {
+      return false;
+    }
+    const abort = target.abort;
+    abort?.call(target);
+    return true;
+  };
+  if (event === "text") {
+    let held = "";
+    let snapshot = "";
+    const emit = async (piece) => {
+      if (piece.length === 0) {
+        return;
+      }
+      const done = await restore.restoreText(piece);
+      if (deny(done.denied)) {
+        return;
+      }
+      snapshot += done.text;
+      listener(done.text, snapshot);
+    };
+    const on = target.on;
+    on?.call(target, "contentBlock", () => {
+      queue(async () => {
+        const tail = held;
+        held = "";
+        await emit(tail);
+        snapshot = "";
+      });
+    });
+    return (delta) => {
+      queue(async () => {
+        const [now, later] = splitHeld(`${held}${String(delta)}`);
+        held = later;
+        await emit(now);
+      });
+    };
+  }
+  if (typeof event === "string" && WHOLE_VALUE_EVENTS.has(event)) {
+    return (...rest) => {
+      queue(async () => {
+        const done = await restore.restoreValue(rest[0]);
+        if (!deny(done.denied)) {
+          listener(done.value, ...rest.slice(1));
+        }
+      });
+    };
+  }
+  return listener;
 }
 function isPlainObject3(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -2510,6 +2932,7 @@ function decorateCompletion(context, fn, options = {}) {
     const response = await fn(...callArgs);
     if (isAsyncIterable(response)) {
       const chunks = [];
+      const restore = cloak?.restore === true ? context.cloak.streamDeps(cloak) : void 0;
       return tapStream(
         response,
         (chunk) => {
@@ -2530,7 +2953,8 @@ function decorateCompletion(context, fn, options = {}) {
               upstreamMs: performance.now() - upstreamStartedAt
             })
           );
-        }
+        },
+        restore
       );
     }
     const gated = await gateResponse(context, response, tools, action);
@@ -2679,6 +3103,12 @@ function inferProvider(request2) {
   if (request2.system !== void 0) {
     return "anthropic";
   }
+  if (request2.contents !== void 0) {
+    return "google";
+  }
+  if (request2.input !== void 0 || request2.instructions !== void 0) {
+    return "openai";
+  }
   const messages = request2.messages;
   if (Array.isArray(messages) && messages.some((m) => m?.role === "system")) {
     return "openai";
@@ -2690,11 +3120,14 @@ function layout(args) {
   if (typeof first === "string") {
     return { text: first, plan: null, stringArg: true };
   }
-  if (isPlainObject4(first)) {
+  if (isPlainObject4(first) && isRecognisedRequest(first)) {
     const plan = planRequest(first);
     return { text: plan.text, plan, stringArg: false };
   }
-  return { text: "", plan: null, stringArg: false };
+  throw new FrostWolfError(
+    "decorate could not find the prompt in this call. The first argument must be a prompt string or a request body with `messages`, `system`, `input`, `instructions`, `prompt`, or `contents`.",
+    "invalid_option"
+  );
 }
 function applyEditsToArgs(args, shape, edits) {
   if (edits.length === 0) {
@@ -2794,6 +3227,229 @@ function emitCapture(context, capture, fields) {
     upstreamMs: fields.upstreamMs,
     sdk: { name: SDK_NAME, version: SDK_VERSION }
   });
+}
+var BLOCKED_STATUS = 403;
+var BLOCKED_HEADER = "x-frostwolf-blocked";
+var PROVIDER_HOSTS = [
+  ["api.openai.com", "openai"],
+  ["openai.azure.com", "azure-openai"],
+  ["api.anthropic.com", "anthropic"],
+  ["generativelanguage.googleapis.com", "google"],
+  ["aiplatform.googleapis.com", "google"]
+];
+var ENCODING_HEADERS = ["content-length", "content-encoding", "transfer-encoding"];
+var Untouched = class {
+  constructor(response) {
+    this.response = response;
+  }
+  response;
+};
+function createGuardedFetch(decorate, options = {}) {
+  const host = globalThis;
+  const { fetch: custom, ...decorateOptions } = options;
+  const send = custom ?? ((input, init) => host.fetch(input, init));
+  return async (input, init) => {
+    const request2 = await readRequest(input, init);
+    if (request2 === null) {
+      return send(input, init);
+    }
+    const upstream = { response: null, stream: null };
+    const call = decorate(
+      async (body) => {
+        const response = await send(request2.url, {
+          ...request2.init,
+          body: JSON.stringify(body)
+        });
+        upstream.response = response;
+        if (!response.ok) {
+          return new Untouched(response);
+        }
+        const type = response.headers.get("content-type") ?? "";
+        if (type.includes("text/event-stream") && response.body !== null) {
+          upstream.stream = { named: false };
+          return readEvents(response, host, upstream.stream);
+        }
+        const text = await response.text();
+        try {
+          return JSON.parse(text);
+        } catch {
+          return new Untouched(rebuilt(host, response, text));
+        }
+      },
+      {
+        ...decorateOptions,
+        baseUrl: decorateOptions.baseUrl ?? originOf(request2.url),
+        ...decorateOptions.provider === void 0 ? providerOf(request2.url) : {}
+      }
+    );
+    const answer = await call(request2.body);
+    return toResponse(host, answer, upstream);
+  };
+}
+async function readRequest(input, init) {
+  let url;
+  let options = { ...init ?? {} };
+  let body = options.body;
+  if (typeof input === "string") {
+    url = input;
+  } else if (isRequestLike(input)) {
+    url = input.url;
+    if (init === void 0) {
+      options = {
+        method: input.method,
+        headers: input.headers,
+        signal: input.signal
+      };
+      body = await input.clone().text();
+    }
+  } else if (input !== null && typeof input === "object" && "href" in input) {
+    url = String(input.href);
+  } else {
+    return null;
+  }
+  const method = String(options.method ?? "GET").toUpperCase();
+  if (method !== "POST" || typeof body !== "string" || body.length === 0) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || !isRecognisedRequest(parsed)) {
+    return null;
+  }
+  return { url, init: options, body: parsed };
+}
+function isRequestLike(value) {
+  return value !== null && typeof value === "object" && typeof value.url === "string" && typeof value.clone === "function";
+}
+async function* readEvents(response, host, state) {
+  const reader = response.body.getReader();
+  const decoder = new host.TextDecoder();
+  let buffer = "";
+  try {
+    for (; ; ) {
+      const { done, value } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r\n?/g, "\n");
+      let end = buffer.indexOf("\n\n");
+      while (end !== -1) {
+        const block = buffer.slice(0, end);
+        buffer = buffer.slice(end + 2);
+        yield* parseBlock(block, state);
+        end = buffer.indexOf("\n\n");
+      }
+      if (done) {
+        yield* parseBlock(buffer, state);
+        return;
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => void 0);
+  }
+}
+function* parseBlock(block, state) {
+  const data = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) {
+      state.named = true;
+    } else if (line.startsWith("data:")) {
+      data.push(line.slice(5).replace(/^ /, ""));
+    }
+  }
+  if (data.length === 0) {
+    return;
+  }
+  const raw = data.join("\n");
+  try {
+    yield JSON.parse(raw);
+  } catch {
+    yield raw;
+  }
+}
+function writeEvents(chunks, host, state) {
+  const encoder = new host.TextEncoder();
+  const iterator = chunks[Symbol.asyncIterator]();
+  return new host.ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await iterator.next();
+        if (done) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(encoder.encode(serializeEvent(value, state)));
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    async cancel() {
+      await iterator.return?.();
+    }
+  });
+}
+function serializeEvent(value, state) {
+  const data = typeof value === "string" ? value : JSON.stringify(value);
+  const type = value?.type;
+  const event = state.named && typeof type === "string" ? `event: ${type}
+` : "";
+  return `${event}data: ${data}
+
+`;
+}
+function toResponse(host, answer, upstream) {
+  if (answer instanceof Untouched) {
+    return answer.response;
+  }
+  if (isBlocked(answer)) {
+    const headers = new host.Headers({ "content-type": "application/json" });
+    headers.set(BLOCKED_HEADER, "1");
+    return new host.Response(JSON.stringify(answer), {
+      status: BLOCKED_STATUS,
+      headers
+    });
+  }
+  const response = upstream.response;
+  if (upstream.stream !== null && isAsyncIterable(answer)) {
+    const headers = new host.Headers(response.headers);
+    for (const name of ENCODING_HEADERS) {
+      headers.delete(name);
+    }
+    return new host.Response(writeEvents(answer, host, upstream.stream), {
+      status: response.status,
+      statusText: response.statusText,
+      headers
+    });
+  }
+  return rebuilt(host, response, JSON.stringify(answer));
+}
+function rebuilt(host, response, body) {
+  const headers = new host.Headers(response.headers);
+  for (const name of ENCODING_HEADERS) {
+    headers.delete(name);
+  }
+  return new host.Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+function isBlocked(value) {
+  const error = value?.error;
+  return error?.code === BLOCKED_CODE;
+}
+function originOf(url) {
+  const match = /^[a-z]+:\/\/[^/]+/i.exec(url);
+  return match?.[0];
+}
+function providerOf(url) {
+  const host = /^[a-z]+:\/\/([^/:]+)/i.exec(url)?.[1] ?? "";
+  const found = PROVIDER_HOSTS.find(
+    ([suffix]) => host === suffix || host.endsWith(`.${suffix}`)
+  );
+  return found === void 0 ? {} : { provider: found[1] };
 }
 var DEFAULT_REPLACEMENT = "[REDACTED]";
 var DEFAULT_ON_MATCH = "block";
@@ -3022,6 +3678,7 @@ var GuardNamespace = class {
         cloak: {
           engine: this.engine,
           restore: (cloak, value) => this.restoreFor(cloak, value),
+          streamDeps: (cloak) => this.streamDepsFor(cloak),
           semanticPass: this.semanticDefault
         },
         emit: this.emit,
@@ -3029,6 +3686,29 @@ var GuardNamespace = class {
         nextEventId: this.nextEventId
       },
       fn,
+      options
+    );
+  }
+  /**
+   * A `fetch` that guards every model call sent through it.
+   *
+   * Hand it to any client that accepts a custom `fetch`, which is every major
+   * one: the OpenAI and Anthropic SDKs, LangChain.js, the Vercel AI SDK,
+   * LlamaIndex.TS, and Google's Gen AI SDK. Each call is scanned, cloaked, and
+   * gated exactly as `decorate` would, and its answer, streamed or not, is
+   * restored before the client reads it. A refusal reaches the client as a
+   * `403` carrying the blocked body.
+   *
+   * @example
+   * ```ts
+   * const openai = new OpenAI({
+   *   fetch: fw.guard.fetch({ cloak: { context: { subject: user.id }, restore: true } }),
+   * });
+   * ```
+   */
+  fetch(options = {}) {
+    return createGuardedFetch(
+      (fn, decorateOptions) => this.decorate(fn, decorateOptions),
       options
     );
   }
@@ -3256,6 +3936,19 @@ var GuardNamespace = class {
       onDenied: cloak.onDenied ?? "throw"
     });
   }
+  /** Restore a stream under the context a call was protected with. */
+  streamDepsFor(cloak) {
+    if (cloak.context === void 0) {
+      throw new FrostWolfError(
+        "This call had no Cloak context, so there is nothing to restore under. Pass `cloak: { context }`.",
+        "invalid_option"
+      );
+    }
+    return this.cloak.streamDeps({
+      context: cloak.context,
+      onDenied: cloak.onDenied ?? "throw"
+    });
+  }
   /** Shape a plan into provider payloads, optionally redacting first. */
   shape(plan, result, eventId, applyRedaction, calls = []) {
     const redacted = redactPlan(
@@ -3344,8 +4037,14 @@ function toError4(value) {
 }
 var TELEMETRY_PATH = "/v1/telemetry";
 var TelemetryClient = class extends BatchTransport {
-  constructor(config) {
+  source;
+  constructor({ source, ...config }) {
     super({ ...config, path: TELEMETRY_PATH });
+    this.source = source;
+  }
+  /** Queue an event, stamped with the client's source when it has one. */
+  enqueue(event) {
+    super.enqueue(this.source === void 0 ? event : { ...event, source: this.source });
   }
 };
 var DEFAULT_ENDPOINT2 = "https://api.frostwolf.app";
@@ -3390,6 +4089,7 @@ var FrostWolfClient = class {
     this.telemetry = new TelemetryClient({
       apiKey,
       endpoint,
+      source: validSource(options.source),
       enabled: options.telemetry ?? true,
       flushIntervalMs: options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS,
       maxBatchSize: options.maxBatchSize ?? DEFAULT_MAX_BATCH_SIZE,
@@ -3527,6 +4227,20 @@ function createEventIdFactory() {
 function toError5(value) {
   return value instanceof Error ? value : new Error(String(value));
 }
+function validSource(source) {
+  if (source === void 0) {
+    return void 0;
+  }
+  const fields = [source.integration, source.installId, source.clientVersion, source.hostVersion];
+  const wellFormed = typeof source.integration === "string" && source.integration.trim().length > 0 && fields.every((field) => field === void 0 || typeof field === "string");
+  if (!wellFormed) {
+    throw new FrostWolfError(
+      "source.integration must be a non-empty string, and every other source field a string.",
+      "invalid_option"
+    );
+  }
+  return source;
+}
 
 // src/guard.ts
 import { createHash, randomBytes } from "crypto";
@@ -3621,6 +4335,7 @@ var AgentGuard = class {
       onScanError: config.onUnavailable,
       onError: deps.onError,
       ...deps.fetch === void 0 ? {} : { fetch: deps.fetch },
+      ...deps.source === void 0 ? {} : { source: deps.source },
       guard: {
         replacement: REMOVED_MARKER,
         cloak: {
@@ -4175,7 +4890,7 @@ var Handlers = class {
       return misconfigured(input.hook_event_name);
     }
     const keyed = { ...config, apiKey: config.apiKey };
-    const guard = this.guards.get(keyed);
+    const guard = this.guards.get(keyed, hostVersion);
     const session = this.sessions.get(input.session_id);
     const context = contextOf(input.session_id);
     switch (input.hook_event_name) {
@@ -4481,16 +5196,24 @@ function misconfigured(event) {
 // src/pool.ts
 import { createHash as createHash2 } from "crypto";
 var GuardPool = class {
-  constructor(deps) {
+  /**
+   * `sourceFor` names the plugin on a guard's events. A guard holds its session's
+   * vault, so it is built once and keeps the host version it was built with; a
+   * Claude Code upgrade shows on the next service, not by losing the vault.
+   */
+  constructor(deps, sourceFor) {
     this.deps = deps;
+    this.sourceFor = sourceFor;
   }
   deps;
+  sourceFor;
   guards = /* @__PURE__ */ new Map();
-  get(config) {
+  get(config, hostVersion = null) {
     const key = keyOf(config);
     let guard = this.guards.get(key);
     if (guard === void 0) {
-      guard = new AgentGuard(config, this.deps);
+      const source = this.sourceFor?.(hostVersion);
+      guard = new AgentGuard(config, source === void 0 ? this.deps : { ...this.deps, source });
       this.guards.set(key, guard);
     }
     return guard;
@@ -4580,7 +5303,7 @@ var Sessions = class {
 
 // src/types.ts
 function parseHookInput(raw) {
-  if (!isRecord(raw) || typeof raw.session_id !== "string") {
+  if (!isRecord2(raw) || typeof raw.session_id !== "string") {
     return null;
   }
   switch (raw.hook_event_name) {
@@ -4602,12 +5325,12 @@ function parseHookInput(raw) {
   }
 }
 function isToolCall(raw) {
-  return typeof raw.tool_name === "string" && typeof raw.tool_use_id === "string" && isRecord(raw.tool_input);
+  return typeof raw.tool_name === "string" && typeof raw.tool_use_id === "string" && isRecord2(raw.tool_input);
 }
 function isBatchCall(value) {
-  return isRecord(value) && typeof value.tool_name === "string" && typeof value.tool_use_id === "string";
+  return isRecord2(value) && typeof value.tool_name === "string" && typeof value.tool_use_id === "string";
 }
-function isRecord(value) {
+function isRecord2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -4634,13 +5357,21 @@ async function startService(options) {
     } catch {
     }
   };
-  const guards = new GuardPool({
-    onError: log,
-    ...options.fetch === void 0 ? {} : { fetch: options.fetch }
-  });
-  const transport = options.fetch ?? ((url, init) => fetch(url, init));
   const dataDir = options.dataDir;
   let installId = null;
+  const guards = new GuardPool(
+    {
+      onError: log,
+      ...options.fetch === void 0 ? {} : { fetch: options.fetch }
+    },
+    (hostVersion) => ({
+      integration: INTEGRATION,
+      clientVersion: PLUGIN_VERSION,
+      ...hostVersion === null ? {} : { hostVersion },
+      ...dataDir === void 0 ? {} : { installId: installId ??= installIdIn(dataDir) }
+    })
+  );
+  const transport = options.fetch ?? ((url, init) => fetch(url, init));
   const handlers = new Handlers(
     guards,
     new Sessions(),
@@ -4724,7 +5455,7 @@ function parseRequest(body) {
   } catch {
     return null;
   }
-  if (!isRecord(raw) || !isRecord(raw.config)) {
+  if (!isRecord2(raw) || !isRecord2(raw.config)) {
     return null;
   }
   const input = parseHookInput(raw.input);

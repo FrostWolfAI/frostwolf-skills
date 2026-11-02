@@ -2,11 +2,12 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   buildPlan,
   CLOAK_UNAVAILABLE_REASON,
+  type ClientSource,
   FrostWolfClient,
   SCAN_UNAVAILABLE_REASON,
   type CloakContext,
   type CloakOptions,
-  type EntityType,
+  type AnyEntityType,
   type FetchLike,
   type GuardInput,
   type InspectionResult,
@@ -86,7 +87,7 @@ export interface AttackFinding {
  */
 export interface Replacement {
   /** The entity type, or null for an injected span taken out. */
-  readonly type: EntityType | null;
+  readonly type: AnyEntityType | null;
   readonly original: string;
   readonly replacement: string;
 }
@@ -128,6 +129,8 @@ export interface GuardDeps {
   readonly fetch?: FetchLike;
   readonly onError: (error: Error) => void;
   readonly now?: () => number;
+  /** Names this plugin on every event, so the console can say where a row came from. */
+  readonly source?: ClientSource;
 }
 
 /**
@@ -153,6 +156,7 @@ export class AgentGuard {
       onScanError: config.onUnavailable,
       onError: deps.onError,
       ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+      ...(deps.source === undefined ? {} : { source: deps.source }),
       guard: {
         replacement: REMOVED_MARKER,
         cloak: {
@@ -410,8 +414,8 @@ function untouched(
 export function entityCounts(
   replaced: readonly Replacement[],
   ignore: (original: string) => boolean = () => false,
-): Map<EntityType, number> {
-  const counts = new Map<EntityType, number>();
+): Map<AnyEntityType, number> {
+  const counts = new Map<AnyEntityType, number>();
   for (const { type, original } of replaced) {
     if (type !== null && !ignore(original)) {
       counts.set(type, (counts.get(type) ?? 0) + 1);

@@ -7,7 +7,7 @@ import type { KeyedConfig } from "./pool.js";
 import { PLUGIN_VERSION } from "./version.js";
 
 /** The integration name the control plane knows this plugin by. */
-const INTEGRATION = "claude-code";
+export const INTEGRATION = "claude-code";
 
 /** Where a check-in is sent, under the endpoint. */
 const CHECKIN_PATH = "/v1/integrations/checkin";

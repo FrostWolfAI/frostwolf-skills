@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { HookConfig } from "./config.js";
+import type { ClientSource } from "@frostwolfai/sdk";
 import { AgentGuard, type GuardDeps } from "./guard.js";
 
 /** Settings with a key, which is the only kind a guard can be built from. */
@@ -15,13 +16,22 @@ export type KeyedConfig = HookConfig & { readonly apiKey: string };
 export class GuardPool {
   private readonly guards = new Map<string, AgentGuard>();
 
-  constructor(private readonly deps: GuardDeps) {}
+  /**
+   * `sourceFor` names the plugin on a guard's events. A guard holds its session's
+   * vault, so it is built once and keeps the host version it was built with; a
+   * Claude Code upgrade shows on the next service, not by losing the vault.
+   */
+  constructor(
+    private readonly deps: GuardDeps,
+    private readonly sourceFor?: (hostVersion: string | null) => ClientSource,
+  ) {}
 
-  get(config: KeyedConfig): AgentGuard {
+  get(config: KeyedConfig, hostVersion: string | null = null): AgentGuard {
     const key = keyOf(config);
     let guard = this.guards.get(key);
     if (guard === undefined) {
-      guard = new AgentGuard(config, this.deps);
+      const source = this.sourceFor?.(hostVersion);
+      guard = new AgentGuard(config, source === undefined ? this.deps : { ...this.deps, source });
       this.guards.set(key, guard);
     }
     return guard;

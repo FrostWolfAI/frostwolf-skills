@@ -112,7 +112,7 @@ export class Handlers {
     }
 
     const keyed: KeyedConfig = { ...config, apiKey: config.apiKey };
-    const guard = this.guards.get(keyed);
+    const guard = this.guards.get(keyed, hostVersion);
     const session = this.sessions.get(input.session_id);
     const context = contextOf(input.session_id);
 

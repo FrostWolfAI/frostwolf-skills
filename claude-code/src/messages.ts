@@ -1,4 +1,4 @@
-import type { EntityType, ToolValidationResult } from "@frostwolfai/sdk";
+import type { AnyEntityType, ToolValidationResult } from "@frostwolfai/sdk";
 import type { AttackFinding } from "./guard.js";
 import { REMOVED_MARKER } from "./protocol.js";
 
@@ -22,7 +22,7 @@ export const SESSION_GUIDE = [
 ].join(" ");
 
 /** "email (2), phone_number (1)", most frequent first. */
-export function describeEntities(entities: ReadonlyMap<EntityType, number>): string {
+export function describeEntities(entities: ReadonlyMap<AnyEntityType, number>): string {
   return [...entities]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([type, count]) => `${type} (${count})`)
@@ -45,13 +45,13 @@ export function promptUnavailable(reason: string): string {
   return `FrostWolf could not check this prompt (${reason}), so it was not sent. Try again in a moment. To send prompts unchecked while FrostWolf is unreachable, set on_unavailable to allow.`;
 }
 
-export function promptData(entities: ReadonlyMap<EntityType, number>): string {
+export function promptData(entities: ReadonlyMap<AnyEntityType, number>): string {
   return `The prompt carries personal data: ${describeEntities(entities)}.`;
 }
 
 export function attachedData(
   label: string,
-  entities: ReadonlyMap<EntityType, number>,
+  entities: ReadonlyMap<AnyEntityType, number>,
 ): string {
   return `${label}, attached with @, carries personal data: ${describeEntities(entities)}.`;
 }
@@ -144,7 +144,7 @@ export function rewriteDropped(tool: string): string {
 
 export function failedCallData(
   tool: string,
-  entities: ReadonlyMap<EntityType, number>,
+  entities: ReadonlyMap<AnyEntityType, number>,
 ): string {
   return `The ${tool} call failed, and its error output carries personal data (${describeEntities(entities)}). A hook cannot rewrite a failed call's output.`;
 }

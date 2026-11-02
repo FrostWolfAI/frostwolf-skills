@@ -42,6 +42,7 @@ export class FakePlane {
   refuseCheckIns = false;
   readonly scans: ScanRecord[] = [];
   readonly checkIns: CheckInRecord[] = [];
+  readonly telemetry: Record<string, unknown>[] = [];
 
   readonly fetch: FetchLike = async (url, init) => {
     const path = new URL(url).pathname;
@@ -59,6 +60,8 @@ export class FakePlane {
 
   answer(path: string, body: Record<string, unknown>): { status: number; json: unknown } {
     if (path === "/v1/telemetry") {
+      const records = Array.isArray(body.records) ? body.records : [];
+      this.telemetry.push(...(records as Record<string, unknown>[]));
       return { status: 200, json: {} };
     }
     if (path !== "/v1/scan") {
