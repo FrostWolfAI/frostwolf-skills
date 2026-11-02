@@ -74,6 +74,8 @@ export interface AttackFinding {
   readonly severity: Severity | null;
   /** Spans taken out. Zero when the verdict named none, as a classifier verdict does. */
   readonly removed: number;
+  /** Whether a signature matched, rather than only the model check flagging it. */
+  readonly bySignature: boolean;
 }
 
 /**
@@ -424,6 +426,7 @@ function findingOf(attack: InspectionResult, removed: number): AttackFinding {
     reason: attack.reason ?? model?.reasons[0] ?? null,
     severity: attack.severity ?? model?.severity ?? null,
     removed,
+    bySignature: attack.matches.length > 0,
   };
 }
 
@@ -447,7 +450,8 @@ function strongest(
     }
   }
 
-  return best === null ? null : { ...best, removed };
+  const bySignature = findings.some((finding) => finding?.bySignature === true);
+  return best === null ? null : { ...best, removed, bySignature };
 }
 
 function rank(severity: Severity | null): number {

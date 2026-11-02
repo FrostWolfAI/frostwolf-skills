@@ -164,7 +164,7 @@ export class Handlers {
     if (outcome.unavailable !== null && config.onUnavailable === "block") {
       return blockPrompt(say.promptUnavailable(outcome.unavailable));
     }
-    const flagged = outcome.attack === null ? [] : [say.promptFlagged(outcome.attack)];
+    const attack = outcome.attack;
 
     const promptEntities = entityCounts(outcome.replaced, known);
     const fileFindings = (
@@ -182,20 +182,27 @@ export class Handlers {
       .map((f) => f.message);
 
     if (data.length === 0 && refusals.length === 0) {
-      return flagged.length === 0 ? null : notice(flagged.join("\n"));
+      return attack === null ? null : notice(say.promptFlagged(attack));
     }
     if (refusals.length === 0 && config.promptPersonalData === "warn") {
+      const flagged = attack === null ? [] : [say.promptFlagged(attack)];
       return notice([say.promptWarned(data), ...flagged].join("\n"));
     }
+
+    // The model check reads personal data itself as unsafe, so a model flag on a
+    // prompt refused for its data is noise, and the version offered instead is
+    // checked again when it is sent. A signature match is reported.
+    const alsoFlagged =
+      attack?.bySignature === true ? [say.promptAlsoFlagged(attack)] : [];
 
     const base = promptEntities.size > 0 ? (outcome.texts[0] ?? "") : input.prompt;
     return blockPrompt(
       [
-        ...flagged,
         say.promptRefused([...data, ...refusals], withoutMentions(base, attached), {
           prompt: promptEntities.size > 0,
           attached: fileFindings.length > 0,
         }),
+        ...alsoFlagged,
       ].join("\n\n"),
     );
   }

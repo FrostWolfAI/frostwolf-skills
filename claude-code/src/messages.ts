@@ -33,6 +33,10 @@ function because(reason: string | null): string {
   return reason === null ? "" : ` (${reason})`;
 }
 
+export function promptAlsoFlagged(attack: AttackFinding): string {
+  return `FrostWolf also flagged this prompt as a possible prompt injection${because(attack.reason)} and recorded it. That alone would not stop it.`;
+}
+
 export function promptFlagged(attack: AttackFinding): string {
   return `FrostWolf flagged this prompt as a possible prompt injection${because(attack.reason)} and recorded it. It was sent as typed.`;
 }

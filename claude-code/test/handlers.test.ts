@@ -304,8 +304,19 @@ describe("UserPromptSubmit", () => {
     });
 
     expect(output?.decision).toBe("block");
-    expect(String(output?.reason)).toContain("flagged this prompt");
+    expect(String(output?.reason)).toContain("also flagged this prompt");
+    expect(String(output?.reason)).not.toContain("sent as typed");
     expect(String(output?.reason)).not.toContain(EMAIL);
+  });
+
+  it("leaves out a model-only flag on a prompt refused for personal data", async () => {
+    const output = await run({
+      hook_event_name: "UserPromptSubmit",
+      prompt: `${MODEL_FLAG} mail ${EMAIL}`,
+    });
+
+    expect(output?.decision).toBe("block");
+    expect(String(output?.reason)).not.toContain("flagged");
   });
 
   it("still enforces the model check on a tool result", async () => {

@@ -9,7 +9,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.2";
+var PLUGIN_VERSION = "0.1.3";
 
 // src/checkin.ts
 var INTEGRATION = "claude-code";
@@ -3808,7 +3808,8 @@ function findingOf(attack, removed) {
   return {
     reason: attack.reason ?? model?.reasons[0] ?? null,
     severity: attack.severity ?? model?.severity ?? null,
-    removed
+    removed,
+    bySignature: attack.matches.length > 0
   };
 }
 function withheld(attack) {
@@ -3826,7 +3827,8 @@ function strongest(findings) {
       best = finding;
     }
   }
-  return best === null ? null : { ...best, removed };
+  const bySignature = findings.some((finding) => finding?.bySignature === true);
+  return best === null ? null : { ...best, removed, bySignature };
 }
 function rank(severity) {
   return severity === null ? -1 : SEVERITY_RANK[severity];
@@ -3977,6 +3979,9 @@ function describeEntities(entities) {
 }
 function because(reason) {
   return reason === null ? "" : ` (${reason})`;
+}
+function promptAlsoFlagged(attack) {
+  return `FrostWolf also flagged this prompt as a possible prompt injection${because(attack.reason)} and recorded it. That alone would not stop it.`;
 }
 function promptFlagged(attack) {
   return `FrostWolf flagged this prompt as a possible prompt injection${because(attack.reason)} and recorded it. It was sent as typed.`;
@@ -4213,7 +4218,7 @@ var Handlers = class {
     if (outcome.unavailable !== null && config.onUnavailable === "block") {
       return blockPrompt(promptUnavailable(outcome.unavailable));
     }
-    const flagged = outcome.attack === null ? [] : [promptFlagged(outcome.attack)];
+    const attack = outcome.attack;
     const promptEntities = entityCounts(outcome.replaced, known);
     const fileFindings = (await Promise.all(
       attached.map((file) => this.checkAttached(config, guard, context, known, file))
@@ -4224,19 +4229,21 @@ var Handlers = class {
     ];
     const refusals = fileFindings.filter((f) => f.kind === "refuse").map((f) => f.message);
     if (data.length === 0 && refusals.length === 0) {
-      return flagged.length === 0 ? null : notice(flagged.join("\n"));
+      return attack === null ? null : notice(promptFlagged(attack));
     }
     if (refusals.length === 0 && config.promptPersonalData === "warn") {
+      const flagged = attack === null ? [] : [promptFlagged(attack)];
       return notice([promptWarned(data), ...flagged].join("\n"));
     }
+    const alsoFlagged = attack?.bySignature === true ? [promptAlsoFlagged(attack)] : [];
     const base = promptEntities.size > 0 ? outcome.texts[0] ?? "" : input.prompt;
     return blockPrompt(
       [
-        ...flagged,
         promptRefused([...data, ...refusals], withoutMentions(base, attached), {
           prompt: promptEntities.size > 0,
           attached: fileFindings.length > 0
-        })
+        }),
+        ...alsoFlagged
       ].join("\n\n")
     );
   }
