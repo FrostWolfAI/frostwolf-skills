@@ -144,8 +144,16 @@ export class Handlers {
         return sessionContext(say.SESSION_GUIDE, null);
       case "UserPromptSubmit":
         return this.prompt(keyed, guard, session, context, input);
-      case "PreToolUse":
-        return this.preTool(guard, session, context, input);
+      case "PreToolUse": {
+        const output = await this.preTool(guard, session, context, input);
+        // A refused call never runs, and Claude Code hands the batch check the
+        // refusal as the call's error output. That text is FrostWolf's own, so
+        // the call is recorded and the batch check leaves it alone.
+        if (isDenial(output)) {
+          session.records.set(input.tool_use_id, { status: "denied", createdAt: this.now() });
+        }
+        return output;
+      }
       case "PostToolUse":
         return this.postTool(keyed, guard, session, context, input);
       case "PostToolBatch":
@@ -456,6 +464,8 @@ export class Handlers {
       const record = session.takeRecord(call.tool_use_id);
       if (record === undefined) {
         unrecorded.push(call);
+      } else if (record.status === "denied") {
+        continue;
       } else if (record.status === "unchecked") {
         problems.push(say.couldNotCheck(call.tool_name, record.reason));
       } else if (!rewriteLanded(record, stringsOf(call.tool_response))) {
@@ -559,6 +569,10 @@ function contextOf(sessionId: string): CloakContext {
  * A value counts only when it sits between path separators, so a name that
  * happens to be the start of a directory name is still cloaked.
  */
+function isDenial(output: HookOutput | null): boolean {
+  return (output?.hookSpecificOutput as { permissionDecision?: unknown } | undefined)?.permissionDecision === "deny";
+}
+
 function knownTo(cwd: string | undefined): (original: string) => boolean {
   const paths = [cwd, homedir()].filter(
     (path): path is string => typeof path === "string" && path.length > 0,

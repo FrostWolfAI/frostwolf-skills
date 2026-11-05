@@ -583,6 +583,25 @@ describe("UserPromptSubmit with files attached by @", () => {
 });
 
 describe("PostToolBatch", () => {
+  it("leaves alone a call FrostWolf refused, whose error output is FrostWolf's reason", async () => {
+    const denied = await run({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_use_id: "toolu_denied",
+      tool_input: { command: "echo [[email:000000000000]]" },
+    });
+    expect(specific(denied).permissionDecision).toBe("deny");
+
+    const output = await run({
+      hook_event_name: "PostToolBatch",
+      tool_calls: [
+        { tool_name: "Bash", tool_use_id: "toolu_denied", tool_response: `hook error: refused, mail ${EMAIL}` },
+      ],
+    });
+
+    expect(output).toBeNull();
+  });
+
   it("passes a batch whose results were cloaked", async () => {
     const { id, content } = await readFile(`email: ${EMAIL}\n`);
 

@@ -10,7 +10,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.7";
+var PLUGIN_VERSION = "0.1.8";
 
 // src/checkin.ts
 var INTEGRATION = "claude-code";
@@ -5305,8 +5305,13 @@ var Handlers = class {
         return sessionContext(SESSION_GUIDE, null);
       case "UserPromptSubmit":
         return this.prompt(keyed, guard, session, context, input);
-      case "PreToolUse":
-        return this.preTool(guard, session, context, input);
+      case "PreToolUse": {
+        const output = await this.preTool(guard, session, context, input);
+        if (isDenial(output)) {
+          session.records.set(input.tool_use_id, { status: "denied", createdAt: this.now() });
+        }
+        return output;
+      }
       case "PostToolUse":
         return this.postTool(keyed, guard, session, context, input);
       case "PostToolBatch":
@@ -5531,6 +5536,8 @@ var Handlers = class {
       const record2 = session.takeRecord(call.tool_use_id);
       if (record2 === void 0) {
         unrecorded.push(call);
+      } else if (record2.status === "denied") {
+        continue;
       } else if (record2.status === "unchecked") {
         problems.push(couldNotCheck(call.tool_name, record2.reason));
       } else if (!rewriteLanded(record2, stringsOf(call.tool_response))) {
@@ -5594,6 +5601,9 @@ var Handlers = class {
 };
 function contextOf(sessionId) {
   return { subject: sessionId, scope: CONTEXT_SCOPE };
+}
+function isDenial(output) {
+  return output?.hookSpecificOutput?.permissionDecision === "deny";
 }
 function knownTo(cwd) {
   const paths = [cwd, homedir2()].filter(

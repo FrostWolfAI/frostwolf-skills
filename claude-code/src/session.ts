@@ -12,6 +12,11 @@ export type ToolRecord =
       readonly status: "unchecked";
       readonly reason: string;
       readonly createdAt: number;
+    }
+  | {
+      /** FrostWolf refused the call, so its "output" is FrostWolf's own reason. */
+      readonly status: "denied";
+      readonly createdAt: number;
     };
 
 /**
