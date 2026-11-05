@@ -4,9 +4,10 @@ import { homedir } from "node:os";
 import type { FetchLike } from "@frostwolfai/sdk";
 import { INTEGRATION, installIdIn, sendCheckIn } from "./checkin.js";
 import { readSurroundings } from "./inventory.js";
-import { Handlers } from "./handlers.js";
+import { Handlers, type PromptCloakRequest } from "./handlers.js";
 import { GuardPool } from "./pool.js";
-import { HEALTH_PATH, HOOK_PATH } from "./protocol.js";
+import { HEALTH_PATH, HOOK_PATH, PROMPT_PATH } from "./protocol.js";
+import { removePointer, writePointer } from "./pointer.js";
 import { Sessions } from "./session.js";
 import {
   isRecord,
@@ -46,6 +47,8 @@ export interface ServiceOptions {
   readonly fetch?: FetchLike;
   /** Called after the service has stopped for being idle. */
   readonly onIdle?: () => void;
+  /** Where session pointers for the prompt mod go. The user's home by default. */
+  readonly home?: string;
 }
 
 export interface RunningService {
@@ -131,6 +134,28 @@ export async function startService(
       return;
     }
 
+    if (req.method === "POST" && req.url === PROMPT_PATH) {
+      readBody(req)
+        .then(async (body) => {
+          const parsed = parsePromptRequest(body);
+          if (parsed === null) {
+            res.writeHead(400).end();
+            return;
+          }
+          const result = await handlers.cloakPrompt(parsed);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(result));
+        })
+        .catch((error: unknown) => {
+          log(toError(error));
+          if (!res.headersSent) {
+            res.writeHead(500);
+          }
+          res.end();
+        });
+      return;
+    }
+
     if (req.method !== "POST" || req.url !== HOOK_PATH) {
       res.writeHead(404).end();
       return;
@@ -143,6 +168,7 @@ export async function startService(
           res.writeHead(400).end();
           return;
         }
+        notePointer(parsed.input.hook_event_name, parsed.input.session_id);
         const output = await handlers.handle(parsed);
         const response: ServiceResponse = { output };
         res.writeHead(200, { "content-type": "application/json" });
@@ -156,6 +182,20 @@ export async function startService(
         res.end();
       });
   });
+
+  // The prompt mod finds this service through a pointer named for the session.
+  const home = options.home ?? homedir();
+  function notePointer(event: string, sessionId: string): void {
+    try {
+      if (event === "SessionStart") {
+        writePointer(home, sessionId, options.socket);
+      } else if (event === "SessionEnd") {
+        removePointer(home, sessionId);
+      }
+    } catch (error) {
+      log(toError(error));
+    }
+  }
 
   const close = (): Promise<void> => {
     closing ??= (async () => {
@@ -207,6 +247,23 @@ function parseRequest(body: string): ServiceRequest | null {
   return input === null
     ? null
     : { config: raw.config as unknown as HookConfig, input, hostVersion };
+}
+
+function parsePromptRequest(body: string): PromptCloakRequest | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!isRecord(raw) || typeof raw.session_id !== "string" || typeof raw.text !== "string") {
+    return null;
+  }
+  return {
+    session_id: raw.session_id,
+    text: raw.text,
+    cwd: typeof raw.cwd === "string" ? raw.cwd : null,
+  };
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

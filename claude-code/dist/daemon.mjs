@@ -10,7 +10,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.5";
+var PLUGIN_VERSION = "0.1.6";
 
 // src/checkin.ts
 var INTEGRATION = "claude-code";
@@ -4703,6 +4703,7 @@ function isHighSurrogate(code) {
 
 // src/protocol.ts
 var HOOK_PATH = "/hook";
+var PROMPT_PATH = "/prompt";
 var HEALTH_PATH = "/health";
 var REMOVED_MARKER = "[FROSTWOLF_REMOVED]";
 
@@ -5103,6 +5104,9 @@ function promptFlagged(attack) {
 function promptUnavailable(reason) {
   return `FrostWolf could not check this prompt (${reason}), so it was not sent. Try again in a moment. To send prompts unchecked while FrostWolf is unreachable, set on_unavailable to allow.`;
 }
+function promptCloaked(entities) {
+  return `FrostWolf cloaked ${describeEntities(entities)} in this prompt before Claude saw it. Claude works with tokens, and FrostWolf puts the values back in tool calls and in what you read.`;
+}
 function promptData(entities) {
   return `The prompt carries personal data: ${describeEntities(entities)}.`;
 }
@@ -5120,7 +5124,9 @@ function attachedTooLarge(label) {
 }
 function promptRefused(findings, suggestion, why) {
   const reasons = [
-    ...why.prompt ? ["A hook cannot rewrite a prompt."] : [],
+    ...why.prompt ? [
+      "FrostWolf cloaks a typed prompt in place through its Claude Code mod, which did not run here: mods need Claude Code 2.1.286 or newer, and an organization can turn off the mods its members install. Run claude --debug to see why."
+    ] : [],
     ...why.attached ? ["Claude Code attaches a file mentioned with @ without a tool call, so FrostWolf cannot cloak it."] : []
   ];
   return [
@@ -5291,6 +5297,7 @@ var Handlers = class {
     const keyed = { ...config, apiKey: config.apiKey };
     const guard = this.guards.get(keyed, hostVersion);
     const session = this.sessions.get(input.session_id);
+    session.keyed = { config: keyed, hostVersion };
     const context = contextOf(input.session_id);
     switch (input.hook_event_name) {
       case "SessionStart":
@@ -5318,22 +5325,68 @@ var Handlers = class {
    * so it is read and checked here, and the version offered names it as a plain
    * path for Claude to read with a tool.
    */
+  /**
+   * Cloak a prompt for the prompt mod, which can replace the prompt's text
+   * where a settings hook cannot.
+   *
+   * The prompt is checked as the prompt hook checks it. When it carries
+   * personal data, the cloaked text is returned to send in its place and
+   * remembered, so the prompt hook that runs on it next checks only its
+   * attached files. Anything this cannot settle is deferred to that hook.
+   */
+  async cloakPrompt(request2) {
+    const session = this.sessions.peek(request2.session_id);
+    if (session?.keyed == null) {
+      return { status: "defer", reason: "the session has not started with FrostWolf" };
+    }
+    const { config, hostVersion } = session.keyed;
+    if (config.promptPersonalData === "warn") {
+      return { status: "defer", reason: "prompt_personal_data is warn" };
+    }
+    const guard = this.guards.get(config, hostVersion);
+    const known = knownTo(request2.cwd ?? void 0);
+    session.addLiterals(tokensIn(request2.text));
+    const outcome = await guard.protectTexts([request2.text], contextOf(request2.session_id), {
+      onMatch: TYPED_PROMPT_ON_MATCH,
+      keep: known,
+      semanticPass: TYPED_PROMPT_SEMANTIC_PASS
+    });
+    if (outcome.unavailable !== null) {
+      return { status: "defer", reason: outcome.unavailable };
+    }
+    const attack = outcome.attack;
+    const entities = entityCounts(outcome.replaced, known);
+    const cloaked = outcome.texts[0];
+    if (entities.size === 0 || cloaked === void 0) {
+      return { status: "clean", message: attack === null ? null : promptFlagged(attack) };
+    }
+    session.markCloaked(cloaked);
+    return {
+      status: "cloaked",
+      text: cloaked,
+      message: [
+        promptCloaked(entities),
+        ...attack?.bySignature === true ? [promptAlsoFlagged(attack)] : []
+      ].join("\n")
+    };
+  }
   async prompt(config, guard, session, context, input) {
     session.addLiterals(tokensIn(input.prompt));
     const known = knownTo(input.cwd);
+    const checked = session.takeCloaked(input.prompt);
     const [outcome, attached] = await Promise.all([
-      guard.protectTexts([input.prompt], context, {
+      checked ? null : guard.protectTexts([input.prompt], context, {
         onMatch: TYPED_PROMPT_ON_MATCH,
         keep: known,
         semanticPass: TYPED_PROMPT_SEMANTIC_PASS
       }),
       attachedFiles(input.prompt, input.cwd)
     ]);
-    if (outcome.unavailable !== null && config.onUnavailable === "block") {
+    if (outcome !== null && outcome.unavailable !== null && config.onUnavailable === "block") {
       return blockPrompt(promptUnavailable(outcome.unavailable));
     }
-    const attack = outcome.attack;
-    const promptEntities = entityCounts(outcome.replaced, known);
+    const attack = outcome?.attack ?? null;
+    const promptEntities = outcome === null ? /* @__PURE__ */ new Map() : entityCounts(outcome.replaced, known);
     const fileFindings = (await Promise.all(
       attached.map((file) => this.checkAttached(config, guard, context, known, file))
     )).filter((finding) => finding !== null);
@@ -5350,7 +5403,7 @@ var Handlers = class {
       return notice([promptWarned(data), ...flagged].join("\n"));
     }
     const alsoFlagged = attack?.bySignature === true ? [promptAlsoFlagged(attack)] : [];
-    const base = promptEntities.size > 0 ? outcome.texts[0] ?? "" : input.prompt;
+    const base = promptEntities.size > 0 ? outcome?.texts[0] ?? "" : input.prompt;
     return blockPrompt(
       [
         promptRefused([...data, ...refusals], withoutMentions(base, attached), {
@@ -5632,9 +5685,35 @@ function keyOf(config) {
   ).digest("hex");
 }
 
+// src/pointer.ts
+import { mkdirSync, rmSync, writeFileSync as writeFileSync2 } from "fs";
+import { join as join3 } from "path";
+var POINTER_DIR = [".frostwolf", "claude-code", "sessions"];
+var SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+var OWNER_ONLY_DIR = 448;
+var OWNER_ONLY_FILE2 = 384;
+function pointerPath(home, sessionId) {
+  return SESSION_ID.test(sessionId) ? join3(home, ...POINTER_DIR, `${sessionId}.json`) : null;
+}
+function writePointer(home, sessionId, socket) {
+  const path = pointerPath(home, sessionId);
+  if (path === null) {
+    return;
+  }
+  mkdirSync(join3(home, ...POINTER_DIR), { recursive: true, mode: OWNER_ONLY_DIR });
+  writeFileSync2(path, JSON.stringify({ socket }), { mode: OWNER_ONLY_FILE2 });
+}
+function removePointer(home, sessionId) {
+  const path = pointerPath(home, sessionId);
+  if (path !== null) {
+    rmSync(path, { force: true });
+  }
+}
+
 // src/session.ts
 var RECORD_TTL_MS = 60 * 60 * 1e3;
 var MAX_LITERALS = 1e3;
+var MAX_CLOAKED_PROMPTS = 20;
 var SESSION_IDLE_MS = 12 * 60 * 60 * 1e3;
 var SessionState = class {
   /**
@@ -5644,6 +5723,17 @@ var SessionState = class {
    */
   literals = /* @__PURE__ */ new Set();
   records = /* @__PURE__ */ new Map();
+  /**
+   * The settings the session's hooks run with, as the last hook brought them,
+   * and the Claude Code version it reported. The prompt mod sends no settings
+   * of its own, so it is checked with these.
+   */
+  keyed = null;
+  /**
+   * Prompts the mod already cloaked, as they were passed on. The prompt hook
+   * that runs on each of them next does not check its text a second time.
+   */
+  cloakedPrompts = [];
   lastSeen;
   constructor(now) {
     this.lastSeen = now;
@@ -5655,6 +5745,21 @@ var SessionState = class {
       }
       this.literals.add(token);
     }
+  }
+  markCloaked(prompt) {
+    this.cloakedPrompts.push(prompt);
+    if (this.cloakedPrompts.length > MAX_CLOAKED_PROMPTS) {
+      this.cloakedPrompts.shift();
+    }
+  }
+  /** Whether the mod cloaked this exact prompt, forgetting it once asked. */
+  takeCloaked(prompt) {
+    const at = this.cloakedPrompts.indexOf(prompt);
+    if (at === -1) {
+      return false;
+    }
+    this.cloakedPrompts.splice(at, 1);
+    return true;
   }
   /** Take a tool's record, leaving none behind. */
   takeRecord(toolUseId) {
@@ -5686,6 +5791,14 @@ var Sessions = class {
     }
     session.lastSeen = now;
     session.pruneRecords(now);
+    return session;
+  }
+  /** A session the service has already seen, without starting one. */
+  peek(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (session !== void 0) {
+      session.lastSeen = this.now();
+    }
     return session;
   }
   drop(sessionId) {
@@ -5796,6 +5909,25 @@ async function startService(options) {
       res.end(JSON.stringify({ ok: true, version: PLUGIN_VERSION }));
       return;
     }
+    if (req.method === "POST" && req.url === PROMPT_PATH) {
+      readBody(req).then(async (body) => {
+        const parsed = parsePromptRequest(body);
+        if (parsed === null) {
+          res.writeHead(400).end();
+          return;
+        }
+        const result = await handlers.cloakPrompt(parsed);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(result));
+      }).catch((error) => {
+        log(toError6(error));
+        if (!res.headersSent) {
+          res.writeHead(500);
+        }
+        res.end();
+      });
+      return;
+    }
     if (req.method !== "POST" || req.url !== HOOK_PATH) {
       res.writeHead(404).end();
       return;
@@ -5806,6 +5938,7 @@ async function startService(options) {
         res.writeHead(400).end();
         return;
       }
+      notePointer(parsed.input.hook_event_name, parsed.input.session_id);
       const output = await handlers.handle(parsed);
       const response = { output };
       res.writeHead(200, { "content-type": "application/json" });
@@ -5818,6 +5951,18 @@ async function startService(options) {
       res.end();
     });
   });
+  const home = options.home ?? homedir3();
+  function notePointer(event, sessionId) {
+    try {
+      if (event === "SessionStart") {
+        writePointer(home, sessionId, options.socket);
+      } else if (event === "SessionEnd") {
+        removePointer(home, sessionId);
+      }
+    } catch (error) {
+      log(toError6(error));
+    }
+  }
   const close = () => {
     closing ??= (async () => {
       clearTimeout(idleTimer);
@@ -5862,6 +6007,22 @@ function parseRequest(body) {
   const input = parseHookInput(raw.input);
   const hostVersion = typeof raw.hostVersion === "string" ? raw.hostVersion : null;
   return input === null ? null : { config: raw.config, input, hostVersion };
+}
+function parsePromptRequest(body) {
+  let raw;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!isRecord2(raw) || typeof raw.session_id !== "string" || typeof raw.text !== "string") {
+    return null;
+  }
+  return {
+    session_id: raw.session_id,
+    text: raw.text,
+    cwd: typeof raw.cwd === "string" ? raw.cwd : null
+  };
 }
 function readBody(req) {
   return new Promise((resolve3, reject) => {

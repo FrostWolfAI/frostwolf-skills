@@ -88,6 +88,23 @@ type AttachedFinding =
  * fail-closed answer.
  */
 /** Reports that a session started on this device. Never waited on. */
+/** What the prompt mod asks: cloak this prompt for this session. */
+export interface PromptCloakRequest {
+  readonly session_id: string;
+  readonly cwd: string | null;
+  readonly text: string;
+}
+
+/**
+ * The mod's answer. `cloaked` carries the text to send in the prompt's place;
+ * every other status means send the prompt as typed and let the prompt hook,
+ * which runs on it next, decide, so the hook stays the one place that refuses.
+ */
+export type PromptCloakResult =
+  | { readonly status: "cloaked"; readonly text: string; readonly message: string }
+  | { readonly status: "clean"; readonly message: string | null }
+  | { readonly status: "defer"; readonly reason: string };
+
 export type CheckIn = (
   config: KeyedConfig,
   hostVersion: string | null,
@@ -118,6 +135,7 @@ export class Handlers {
     const keyed: KeyedConfig = { ...config, apiKey: config.apiKey };
     const guard = this.guards.get(keyed, hostVersion);
     const session = this.sessions.get(input.session_id);
+    session.keyed = { config: keyed, hostVersion };
     const context = contextOf(input.session_id);
 
     switch (input.hook_event_name) {
@@ -147,6 +165,57 @@ export class Handlers {
    * so it is read and checked here, and the version offered names it as a plain
    * path for Claude to read with a tool.
    */
+  /**
+   * Cloak a prompt for the prompt mod, which can replace the prompt's text
+   * where a settings hook cannot.
+   *
+   * The prompt is checked as the prompt hook checks it. When it carries
+   * personal data, the cloaked text is returned to send in its place and
+   * remembered, so the prompt hook that runs on it next checks only its
+   * attached files. Anything this cannot settle is deferred to that hook.
+   */
+  async cloakPrompt(request: PromptCloakRequest): Promise<PromptCloakResult> {
+    const session = this.sessions.peek(request.session_id);
+    if (session?.keyed == null) {
+      return { status: "defer", reason: "the session has not started with FrostWolf" };
+    }
+    const { config, hostVersion } = session.keyed;
+    if (config.promptPersonalData === "warn") {
+      return { status: "defer", reason: "prompt_personal_data is warn" };
+    }
+
+    const guard = this.guards.get(config, hostVersion);
+    const known = knownTo(request.cwd ?? undefined);
+    session.addLiterals(tokensIn(request.text));
+    const outcome = await guard.protectTexts([request.text], contextOf(request.session_id), {
+      onMatch: TYPED_PROMPT_ON_MATCH,
+      keep: known,
+      semanticPass: TYPED_PROMPT_SEMANTIC_PASS,
+    });
+    if (outcome.unavailable !== null) {
+      return { status: "defer", reason: outcome.unavailable };
+    }
+
+    const attack = outcome.attack;
+    const entities = entityCounts(outcome.replaced, known);
+    const cloaked = outcome.texts[0];
+    if (entities.size === 0 || cloaked === undefined) {
+      return { status: "clean", message: attack === null ? null : say.promptFlagged(attack) };
+    }
+
+    // The model check reads personal data itself as unsafe, so on a prompt with
+    // data in it only a signature match is worth reporting, as on a refused one.
+    session.markCloaked(cloaked);
+    return {
+      status: "cloaked",
+      text: cloaked,
+      message: [
+        say.promptCloaked(entities),
+        ...(attack?.bySignature === true ? [say.promptAlsoFlagged(attack)] : []),
+      ].join("\n"),
+    };
+  }
+
   private async prompt(
     config: KeyedConfig,
     guard: AgentGuard,
@@ -156,21 +225,25 @@ export class Handlers {
   ): Promise<HookOutput | null> {
     session.addLiterals(tokensIn(input.prompt));
     const known = knownTo(input.cwd);
+    // A prompt the mod cloaked was checked there; only its attached files are left.
+    const checked = session.takeCloaked(input.prompt);
     const [outcome, attached] = await Promise.all([
-      guard.protectTexts([input.prompt], context, {
-        onMatch: TYPED_PROMPT_ON_MATCH,
-        keep: known,
-        semanticPass: TYPED_PROMPT_SEMANTIC_PASS,
-      }),
+      checked
+        ? null
+        : guard.protectTexts([input.prompt], context, {
+            onMatch: TYPED_PROMPT_ON_MATCH,
+            keep: known,
+            semanticPass: TYPED_PROMPT_SEMANTIC_PASS,
+          }),
       attachedFiles(input.prompt, input.cwd),
     ]);
 
-    if (outcome.unavailable !== null && config.onUnavailable === "block") {
+    if (outcome !== null && outcome.unavailable !== null && config.onUnavailable === "block") {
       return blockPrompt(say.promptUnavailable(outcome.unavailable));
     }
-    const attack = outcome.attack;
+    const attack = outcome?.attack ?? null;
 
-    const promptEntities = entityCounts(outcome.replaced, known);
+    const promptEntities = outcome === null ? new Map() : entityCounts(outcome.replaced, known);
     const fileFindings = (
       await Promise.all(
         attached.map((file) => this.checkAttached(config, guard, context, known, file)),
@@ -199,7 +272,7 @@ export class Handlers {
     const alsoFlagged =
       attack?.bySignature === true ? [say.promptAlsoFlagged(attack)] : [];
 
-    const base = promptEntities.size > 0 ? (outcome.texts[0] ?? "") : input.prompt;
+    const base = promptEntities.size > 0 ? (outcome?.texts[0] ?? "") : input.prompt;
     return blockPrompt(
       [
         say.promptRefused([...data, ...refusals], withoutMentions(base, attached), {

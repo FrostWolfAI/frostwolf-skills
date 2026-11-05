@@ -45,6 +45,10 @@ export function promptUnavailable(reason: string): string {
   return `FrostWolf could not check this prompt (${reason}), so it was not sent. Try again in a moment. To send prompts unchecked while FrostWolf is unreachable, set on_unavailable to allow.`;
 }
 
+export function promptCloaked(entities: ReadonlyMap<AnyEntityType, number>): string {
+  return `FrostWolf cloaked ${describeEntities(entities)} in this prompt before Claude saw it. Claude works with tokens, and FrostWolf puts the values back in tool calls and in what you read.`;
+}
+
 export function promptData(entities: ReadonlyMap<AnyEntityType, number>): string {
   return `The prompt carries personal data: ${describeEntities(entities)}.`;
 }
@@ -81,7 +85,11 @@ export function promptRefused(
   why: { readonly prompt: boolean; readonly attached: boolean },
 ): string {
   const reasons = [
-    ...(why.prompt ? ["A hook cannot rewrite a prompt."] : []),
+    ...(why.prompt
+      ? [
+          "FrostWolf cloaks a typed prompt in place through its Claude Code mod, which did not run here: mods need Claude Code 2.1.286 or newer, and an organization can turn off the mods its members install. Run claude --debug to see why.",
+        ]
+      : []),
     ...(why.attached
       ? ["Claude Code attaches a file mentioned with @ without a tool call, so FrostWolf cannot cloak it."]
       : []),

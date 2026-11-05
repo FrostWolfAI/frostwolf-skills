@@ -1,4 +1,7 @@
 {
+  "modules": [
+    "./prompt-cloak.ts"
+  ],
   "hooks": {
     "SessionStart": [
       {

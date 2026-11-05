@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -8,6 +9,24 @@ import { tokensIn } from "../src/tokens.js";
 import type { HookOutput } from "../src/types.js";
 import { EMAIL, FakePlane } from "./fake-plane.js";
 import { PLUGIN_VERSION } from "../src/version.js";
+import { pointerPath, POINTER_DIR } from "../src/pointer.js";
+import { PROMPT_PATH } from "../src/protocol.js";
+
+/** Post a prompt to the service the way the prompt mod does. */
+function cloak(body: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      { socketPath: socket, path: PROMPT_PATH, method: "POST", headers: { "content-type": "application/json" } },
+      (res) => {
+        let text = "";
+        res.on("data", (chunk: Buffer) => (text += chunk.toString("utf8")));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: text === "" ? {} : JSON.parse(text) }));
+      },
+    );
+    req.on("error", reject);
+    req.end(JSON.stringify(body));
+  });
+}
 
 /** Permission bits that let anyone but the owner in. */
 const GROUP_AND_OTHER_BITS = 0o077;
@@ -21,7 +40,7 @@ beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "fw-svc-"));
   socket = join(dir, "s.sock");
   plane = new FakePlane();
-  service = await startService({ socket, fetch: plane.fetch, dataDir: dir });
+  service = await startService({ socket, fetch: plane.fetch, dataDir: dir, home: dir });
 });
 
 afterEach(async () => {
@@ -45,6 +64,40 @@ function hook(input: Record<string, unknown>): Promise<HookOutput | null> {
 function specific(output: HookOutput | null): Record<string, unknown> {
   return (output?.hookSpecificOutput ?? {}) as Record<string, unknown>;
 }
+
+describe("the prompt mod's way in", () => {
+  it("names the socket for each session that starts, and forgets it when the session ends", async () => {
+    await hook({ hook_event_name: "SessionStart", source: "startup" });
+    const pointer = pointerPath(dir, "FW-TEST-SESSION-A") ?? "";
+
+    expect(JSON.parse(readFileSync(pointer, "utf8"))).toEqual({ socket });
+    expect(statSync(pointer).mode & GROUP_AND_OTHER_BITS).toBe(0);
+
+    await hook({ hook_event_name: "SessionEnd", reason: "other" });
+    expect(existsSync(pointer)).toBe(false);
+  });
+
+  it("cloaks a prompt for a session that started", async () => {
+    await hook({ hook_event_name: "SessionStart", source: "startup" });
+
+    const answer = await cloak({ session_id: "FW-TEST-SESSION-A", cwd: dir, text: `mail ${EMAIL}` });
+
+    expect(answer.status).toBe(200);
+    expect(answer.body.status).toBe("cloaked");
+    expect(String(answer.body.text)).not.toContain(EMAIL);
+  });
+
+  it("refuses a malformed request", async () => {
+    expect((await cloak({ text: 1 })).status).toBe(400);
+  });
+
+  it("is reached by the mod at the same pointer path and endpoint", () => {
+    const mod = readFileSync(join(__dirname, "..", "hooks", "prompt-cloak.ts"), "utf8");
+
+    expect(mod).toContain(`const POINTER_DIR = '${POINTER_DIR.join("/")}'`);
+    expect(mod).toContain(`const PROMPT_URL = 'http://frostwolf${PROMPT_PATH}'`);
+  });
+});
 
 describe("the local service", () => {
   it("listens on a socket only its owner can open", () => {

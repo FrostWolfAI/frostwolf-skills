@@ -419,6 +419,88 @@ describe("UserPromptSubmit", () => {
   });
 });
 
+describe("cloakPrompt, for the prompt mod", () => {
+  async function start(config: HookConfig = CONFIG) {
+    await run({ hook_event_name: "SessionStart", source: "startup" }, config);
+  }
+
+  it("defers a session the service has not seen start", async () => {
+    const answer = await handlers.cloakPrompt({ session_id: "unknown", cwd: null, text: `mail ${EMAIL}` });
+
+    expect(answer.status).toBe("defer");
+    expect(plane.scans).toHaveLength(0);
+  });
+
+  it("cloaks personal data, and the prompt hook then sends the cloaked prompt", async () => {
+    await start();
+
+    const answer = await handlers.cloakPrompt({ session_id: SESSION, cwd: "/work/project", text: `mail ${EMAIL} today` });
+
+    expect(answer.status).toBe("cloaked");
+    const text = answer.status === "cloaked" ? answer.text : "";
+    expect(text).not.toContain(EMAIL);
+    expect(text).toMatch(/\[\[email:[0-9a-f]+\]\]/);
+    expect(answer.status === "cloaked" ? answer.message : "").toContain("cloaked email (1)");
+
+    const scans = plane.scans.length;
+    const output = await run({ hook_event_name: "UserPromptSubmit", prompt: text });
+    expect(output?.decision).toBeUndefined();
+    expect(plane.scans).toHaveLength(scans);
+  });
+
+  it("puts the value back when Claude uses the token in a tool call", async () => {
+    await start();
+    const answer = await handlers.cloakPrompt({ session_id: SESSION, cwd: null, text: `mail ${EMAIL}` });
+    const token = (answer.status === "cloaked" ? answer.text : "").match(/\[\[email:[0-9a-f]+\]\]/)?.[0] ?? "";
+
+    const output = await run({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_use_id: "toolu_prompt",
+      tool_input: { command: `echo ${token}` },
+    });
+
+    expect(JSON.stringify(specific(output).updatedInput)).toContain(EMAIL);
+  });
+
+  it("checks a prompt the mod did not cloak, as before", async () => {
+    await start();
+
+    const output = await run({ hook_event_name: "UserPromptSubmit", prompt: `mail ${EMAIL}` });
+
+    expect(output?.decision).toBe("block");
+  });
+
+  it("answers clean for a prompt with no personal data, and passes on a flag", async () => {
+    await start();
+
+    expect(await handlers.cloakPrompt({ session_id: SESSION, cwd: null, text: "fix the tests" })).toEqual({
+      status: "clean",
+      message: null,
+    });
+    const flagged = await handlers.cloakPrompt({ session_id: SESSION, cwd: null, text: `please ${ATTACK}` });
+    expect(flagged.status).toBe("clean");
+    expect(flagged.status === "clean" ? flagged.message : "").toContain("flagged this prompt");
+  });
+
+  it("reports a signature flag on a cloaked prompt, and leaves out a model-only one", async () => {
+    await start();
+
+    const signature = await handlers.cloakPrompt({ session_id: SESSION, cwd: null, text: `${ATTACK} mail ${EMAIL}` });
+    const model = await handlers.cloakPrompt({ session_id: SESSION, cwd: null, text: `${MODEL_FLAG} mail ${EMAIL}` });
+
+    expect(signature.status === "cloaked" ? signature.message : "").toContain("also flagged this prompt");
+    expect(model.status === "cloaked" ? model.message : "").not.toContain("flagged");
+  });
+
+  it("defers when the prompt policy is warn", async () => {
+    const warn: HookConfig = { ...CONFIG, promptPersonalData: "warn" };
+    await start(warn);
+
+    expect((await handlers.cloakPrompt({ session_id: SESSION, cwd: null, text: `mail ${EMAIL}` })).status).toBe("defer");
+  });
+});
+
 describe("UserPromptSubmit with files attached by @", () => {
   let dir: string;
 

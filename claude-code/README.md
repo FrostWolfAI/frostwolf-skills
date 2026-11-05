@@ -40,7 +40,8 @@ for it instead, install from a Claude Code session:
 | `PostToolUse` | Replaces personal data and secrets in every tool result with tokens such as `[[email:f098b0367449]]`, and takes injected instructions out, before Claude sees the result. |
 | `PreToolUse` | Puts the real values back into a tool call, so a file Claude writes or a command it runs gets the original. Validates shell, web fetch, and MCP calls before they run. |
 | `PostToolBatch` | Checks every result exactly as Claude will receive it, and stops the turn before the next model call if one was not cloaked. |
-| `UserPromptSubmit` | Flags a prompt that looks like prompt injection, records it, and sends it as typed, because a prompt you type is you directing your own session. Refuses a prompt that carries personal data, or attaches a file with `@` that does or that carries an injection, and offers a version to send instead. |
+| `prompt.submit` (mod) | Cloaks personal data and secrets in the prompt you type before Claude sees it, and sends the cloaked prompt. Claude works with tokens; your screen and your tool calls get the values. Needs Claude Code 2.1.286 or newer. |
+| `UserPromptSubmit` | Flags a prompt that looks like prompt injection, records it, and sends it as typed, because a prompt you type is you directing your own session. Refuses a prompt that attaches a file with `@` that carries personal data or an injection. Refuses a prompt with personal data only where the mod could not cloak it, and offers a version to send instead. |
 | `MessageDisplay` | Shows the real values on your screen. Claude keeps the tokens. |
 | `SessionEnd` | Erases the session's values. |
 
@@ -51,9 +52,9 @@ variable instead.
 
 | Option | Environment variable | Default | Values |
 | --- | --- | --- | --- |
-| `api_key` | `FROSTWOLF_API_KEY` | none | Your API key. Required. |
+| `api_key` | `FROSTWOLF_API_KEY` | none | Your API key. Required. Set it as a plugin option: the prompt mod does not load without it. |
 | `endpoint` | `FROSTWOLF_ENDPOINT` | `https://api.frostwolf.app` | Control plane base URL. |
-| `prompt_personal_data` | `FROSTWOLF_PROMPT_PERSONAL_DATA` | `block` | `block` refuses and offers a cloaked version. `warn` sends as typed and tells you. |
+| `prompt_personal_data` | `FROSTWOLF_PROMPT_PERSONAL_DATA` | `block` | `block` cloaks the prompt, or, where the mod does not run, refuses it and offers a cloaked version. `warn` sends as typed and tells you. |
 | `on_unavailable` | `FROSTWOLF_ON_UNAVAILABLE` | `block` | `block` refuses what FrostWolf could not check. `allow` lets it through. |
 | `display` | `FROSTWOLF_DISPLAY` | `restore` | `restore` shows real values. `tokens` shows tokens. |
 
@@ -121,10 +122,13 @@ The check-in also reports, for the console's Claude Code page:
   only that project's items. The path itself is not sent.
 
 ```
+hooks/
+  prompt-cloak.ts the mod: cloaks a typed prompt through the local service
 src/
   hook-main.ts    entry point of every hook; prints the decision
   hook.ts         hands the event to the service, or fails closed
   checkin.ts      reports the device when a session starts
+  pointer.ts      names the service's socket for the prompt mod
   inventory.ts    reads the account, MCP servers, plugins, skills, and hooks
   daemon-main.ts  entry point of the local service
   daemon.ts       the service: an HTTP server on a private socket
