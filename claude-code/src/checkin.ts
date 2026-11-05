@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { hostname, release } from "node:os";
 import { basename, join } from "node:path";
 import type { FetchLike } from "@frostwolfai/sdk";
+import type { Surroundings } from "./inventory.js";
 import type { KeyedConfig } from "./pool.js";
 import { PLUGIN_VERSION } from "./version.js";
 
@@ -72,10 +73,15 @@ export function installIdIn(dataDir: string): string {
   return created;
 }
 
-/** What a check-in reports. Never payload content. */
+/**
+ * What a check-in reports. Never payload content. The surroundings, when read,
+ * add the Claude account the device is signed in to and what is installed
+ * beside the plugin, by name and shape only; see `inventory.ts`.
+ */
 export function checkInBody(
   installId: string,
   hostVersion: string | null,
+  surroundings: Surroundings | null = null,
 ): Record<string, unknown> {
   return {
     integration: INTEGRATION,
@@ -91,12 +97,21 @@ export function checkInBody(
       host: hostVersion,
       runtime: process.versions.node,
     },
+    ...(surroundings === null
+      ? {}
+      : {
+          ...(surroundings.account === null ? {} : { account: surroundings.account }),
+          ...(surroundings.project === null ? {} : { project: surroundings.project }),
+          inventory: surroundings.inventory,
+        }),
   };
 }
 
 export interface CheckInDeps {
   readonly fetch: FetchLike;
   readonly installId: () => string;
+  /** What is installed around the session. Its failure costs the inventory, not the check-in. */
+  readonly surroundings: (cwd: string | null) => Surroundings;
   readonly onError: (error: Error) => void;
 }
 
@@ -110,8 +125,15 @@ export function sendCheckIn(
   deps: CheckInDeps,
   config: KeyedConfig,
   hostVersion: string | null,
+  cwd: string | null,
 ): void {
   const run = async (): Promise<void> => {
+    let surroundings: Surroundings | null = null;
+    try {
+      surroundings = deps.surroundings(cwd);
+    } catch (error) {
+      deps.onError(error instanceof Error ? error : new Error(String(error)));
+    }
     const endpoint = (config.endpoint ?? DEFAULT_ENDPOINT).replace(/\/+$/, "");
     const response = await deps.fetch(`${endpoint}${CHECKIN_PATH}`, {
       method: "POST",
@@ -119,7 +141,7 @@ export function sendCheckIn(
         authorization: `Bearer ${config.apiKey}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify(checkInBody(deps.installId(), hostVersion)),
+      body: JSON.stringify(checkInBody(deps.installId(), hostVersion, surroundings)),
       signal: AbortSignal.timeout(CHECKIN_TIMEOUT_MS),
     });
     if (!response.ok) {

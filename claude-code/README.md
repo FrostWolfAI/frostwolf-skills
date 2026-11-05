@@ -98,11 +98,34 @@ under a random installation id kept in the plugin's data directory. The
 FrostWolf console lists these devices. A check-in carries no prompt, file, or
 value, and a failed check-in never delays a session.
 
+The check-in also reports, for the console's Claude Code page:
+
+- **The Claude account** the device is signed in to: its email address and
+  organization name, read from Claude Code's own configuration. The console
+  attributes a device to a person by its key first, so a device that reports
+  someone else's account under a personal key is shown as a mismatch.
+- **What is installed.** Each MCP server's name, scope, transport, and target;
+  each plugin's id, version, and whether it is enabled; and each skill's name,
+  including the skills your Claude account syncs.
+  A server's target is the origin of its URL, or its program and, for a
+  package runner such as `npx` or `uvx`, the package it runs. Environment
+  variables, headers, other arguments, and paths are never read into the
+  report.
+- **Hooks**, from every settings file and enabled plugin: each hook's event,
+  matcher, type, and what it runs, which is the program and, for an interpreter
+  or a package runner, the script or package; or the origin of an HTTP hook's
+  URL. In place of the command itself the plugin sends a digest of it, so the
+  same hook groups together across devices and a changed hook shows up. The
+  `disableAllHooks` setting is reported too, because it turns FrostWolf off.
+- **A digest of the project directory**, so the items a project adds replace
+  only that project's items. The path itself is not sent.
+
 ```
 src/
   hook-main.ts    entry point of every hook; prints the decision
   hook.ts         hands the event to the service, or fails closed
   checkin.ts      reports the device when a session starts
+  inventory.ts    reads the account, MCP servers, plugins, skills, and hooks
   daemon-main.ts  entry point of the local service
   daemon.ts       the service: an HTTP server on a private socket
   handlers.ts     what each hook event does

@@ -616,4 +616,20 @@ describe("SessionStart", () => {
 
     expect(specific(output).additionalContext).toContain("Copy tokens exactly");
   });
+
+  it("checks in with the session's directory, so the inventory covers its project", async () => {
+    const calls: unknown[][] = [];
+    const checking = new Handlers(guards, new Sessions(), (...args) => {
+      calls.push(args);
+    });
+
+    await checking.handle({
+      config: CONFIG,
+      input: { session_id: SESSION, cwd: "/work/project", hook_event_name: "SessionStart", source: "startup" } as unknown as HookInput,
+      hostVersion: "2.1.316",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.slice(1)).toEqual(["2.1.316", "/work/project"]);
+  });
 });

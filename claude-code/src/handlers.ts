@@ -88,7 +88,11 @@ type AttachedFinding =
  * fail-closed answer.
  */
 /** Reports that a session started on this device. Never waited on. */
-export type CheckIn = (config: KeyedConfig, hostVersion: string | null) => void;
+export type CheckIn = (
+  config: KeyedConfig,
+  hostVersion: string | null,
+  cwd: string | null,
+) => void;
 
 export class Handlers {
   constructor(
@@ -118,7 +122,7 @@ export class Handlers {
 
     switch (input.hook_event_name) {
       case "SessionStart":
-        this.checkIn(keyed, hostVersion);
+        this.checkIn(keyed, hostVersion, input.cwd ?? null);
         return sessionContext(say.SESSION_GUIDE, null);
       case "UserPromptSubmit":
         return this.prompt(keyed, guard, session, context, input);

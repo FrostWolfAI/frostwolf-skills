@@ -1,7 +1,9 @@
 import { appendFileSync, unlinkSync } from "node:fs";
 import { createServer, request, type IncomingMessage, type Server } from "node:http";
+import { homedir } from "node:os";
 import type { FetchLike } from "@frostwolfai/sdk";
 import { INTEGRATION, installIdIn, sendCheckIn } from "./checkin.js";
+import { readSurroundings } from "./inventory.js";
 import { Handlers } from "./handlers.js";
 import { GuardPool } from "./pool.js";
 import { HEALTH_PATH, HOOK_PATH } from "./protocol.js";
@@ -101,15 +103,18 @@ export async function startService(
     new Sessions(),
     dataDir === undefined
       ? undefined
-      : (config, hostVersion) =>
+      : (config, hostVersion, cwd) =>
           sendCheckIn(
             {
               fetch: transport,
               installId: () => (installId ??= installIdIn(dataDir)),
+              surroundings: (at) =>
+                readSurroundings({ home: homedir(), cwd: at, env: process.env, platform: process.platform }),
               onError: log,
             },
             config,
             hostVersion,
+            cwd,
           ),
   );
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;

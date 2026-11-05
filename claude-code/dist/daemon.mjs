@@ -1,6 +1,7 @@
 // src/daemon.ts
 import { appendFileSync, unlinkSync } from "fs";
 import { createServer, request } from "http";
+import { homedir as homedir3 } from "os";
 
 // src/checkin.ts
 import { randomUUID } from "crypto";
@@ -9,7 +10,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.4";
+var PLUGIN_VERSION = "0.1.5";
 
 // src/checkin.ts
 var INTEGRATION = "claude-code";
@@ -33,7 +34,7 @@ function installIdIn(dataDir) {
 `, { mode: OWNER_ONLY_FILE });
   return created;
 }
-function checkInBody(installId, hostVersion) {
+function checkInBody(installId, hostVersion, surroundings = null) {
   return {
     integration: INTEGRATION,
     install_id: installId,
@@ -47,11 +48,22 @@ function checkInBody(installId, hostVersion) {
       client: PLUGIN_VERSION,
       host: hostVersion,
       runtime: process.versions.node
+    },
+    ...surroundings === null ? {} : {
+      ...surroundings.account === null ? {} : { account: surroundings.account },
+      ...surroundings.project === null ? {} : { project: surroundings.project },
+      inventory: surroundings.inventory
     }
   };
 }
-function sendCheckIn(deps, config, hostVersion) {
+function sendCheckIn(deps, config, hostVersion, cwd) {
   const run = async () => {
+    let surroundings = null;
+    try {
+      surroundings = deps.surroundings(cwd);
+    } catch (error) {
+      deps.onError(error instanceof Error ? error : new Error(String(error)));
+    }
     const endpoint = (config.endpoint ?? DEFAULT_ENDPOINT).replace(/\/+$/, "");
     const response = await deps.fetch(`${endpoint}${CHECKIN_PATH}`, {
       method: "POST",
@@ -59,7 +71,7 @@ function sendCheckIn(deps, config, hostVersion) {
         authorization: `Bearer ${config.apiKey}`,
         "content-type": "application/json"
       },
-      body: JSON.stringify(checkInBody(deps.installId(), hostVersion)),
+      body: JSON.stringify(checkInBody(deps.installId(), hostVersion, surroundings)),
       signal: AbortSignal.timeout(CHECKIN_TIMEOUT_MS)
     });
     if (!response.ok) {
@@ -69,6 +81,393 @@ function sendCheckIn(deps, config, hostVersion) {
   run().catch((error) => {
     deps.onError(error instanceof Error ? error : new Error(String(error)));
   });
+}
+
+// src/inventory.ts
+import { createHash } from "crypto";
+import { readdirSync, readFileSync as readFileSync2, statSync } from "fs";
+import { basename as basename2, isAbsolute, join as join2, resolve } from "path";
+var SYNCED_DIR = "synced";
+var PROJECT_KEY_CHARS = 16;
+var MAX_ITEMS = 200;
+var MANAGED_SETTINGS = {
+  darwin: "/Library/Application Support/ClaudeCode/managed-settings.json",
+  linux: "/etc/claude-code/managed-settings.json",
+  win32: "C:\\ProgramData\\ClaudeCode\\managed-settings.json"
+};
+var HOOK_DIGEST_CHARS = 16;
+var INTERPRETERS = /* @__PURE__ */ new Set([
+  "node",
+  "python",
+  "python3",
+  "bash",
+  "sh",
+  "zsh",
+  "fish",
+  "ruby",
+  "perl",
+  "php",
+  "pwsh",
+  "powershell",
+  "deno",
+  "bun",
+  "tsx",
+  "ts-node",
+  "osascript"
+]);
+var INLINE_FLAGS = /* @__PURE__ */ new Set(["-c", "-e", "--eval", "-Command", "-p", "--print"]);
+var PACKAGE_RUNNERS = /* @__PURE__ */ new Set([
+  "npx",
+  "bunx",
+  "pnpx",
+  "uvx",
+  "pipx",
+  "pnpm",
+  "yarn",
+  "bun",
+  "uv",
+  "deno",
+  "docker",
+  "podman"
+]);
+var RUNNER_SUBCOMMANDS = /* @__PURE__ */ new Set(["dlx", "x", "exec", "run", "tool"]);
+var PACKAGE = /^(@[a-z0-9._-]+\/)?[a-z0-9._/-]+([@:][a-z0-9._^~-]+)?$/i;
+var MAX_PACKAGE_CHARS = 100;
+var MANAGED_MCP = {
+  darwin: "/Library/Application Support/ClaudeCode/managed-mcp.json",
+  linux: "/etc/claude-code/managed-mcp.json",
+  win32: "C:\\ProgramData\\ClaudeCode\\managed-mcp.json"
+};
+function readSurroundings(locations) {
+  const configDir = locations.env.CLAUDE_CONFIG_DIR ?? join2(locations.home, ".claude");
+  const globalFile = locations.env.CLAUDE_CONFIG_DIR === void 0 ? join2(locations.home, ".claude.json") : join2(locations.env.CLAUDE_CONFIG_DIR, ".claude.json");
+  const global = readJson(globalFile);
+  const cwd = locations.cwd;
+  const project = cwd === null ? void 0 : record(record(global?.projects)?.[cwd]);
+  const settings = [
+    { scope: "managed", value: readJson(MANAGED_SETTINGS[locations.platform] ?? "") },
+    { scope: "user", value: readJson(join2(configDir, "settings.json")) },
+    { scope: "project", value: cwd === null ? void 0 : readJson(join2(cwd, ".claude", "settings.json")) },
+    { scope: "local", value: cwd === null ? void 0 : readJson(join2(cwd, ".claude", "settings.local.json")) }
+  ];
+  const enabledPlugins = Object.assign(
+    {},
+    ...settings.filter((file) => file.scope !== "managed").map((file) => record(file.value?.enabledPlugins) ?? {})
+  );
+  const installed = installedPlugins(configDir, cwd, enabledPlugins);
+  const mcpServers = [
+    ...serversIn(global?.mcpServers, "user"),
+    ...serversIn(project?.mcpServers, "local"),
+    ...cwd === null ? [] : projectServers(cwd, project),
+    ...serversIn(readJson(MANAGED_MCP[locations.platform] ?? "")?.mcpServers, "managed"),
+    ...installed.flatMap(
+      (plugin) => plugin.item.enabled === false ? [] : pluginServers(plugin.path, plugin.item.name)
+    )
+  ];
+  const skills = [
+    ...skillsIn(join2(configDir, "skills"), "user"),
+    ...syncedSkills(join2(configDir, "skills", SYNCED_DIR)),
+    ...cwd === null ? [] : skillsIn(join2(cwd, ".claude", "skills"), "project"),
+    ...installed.flatMap(
+      (plugin) => plugin.item.enabled === false ? [] : skillsIn(join2(plugin.path, "skills"), "plugin").map((skill) => ({
+        name: `${pluginName(plugin.item.name)}:${skill.name}`,
+        scope: "plugin",
+        plugin: plugin.item.name
+      }))
+    )
+  ];
+  const oauth = record(global?.oauthAccount);
+  const email = text(oauth?.emailAddress);
+  const organization = text(oauth?.organizationName);
+  return {
+    account: email === void 0 && organization === void 0 ? null : { ...email === void 0 ? {} : { email }, ...organization === void 0 ? {} : { organization } },
+    project: cwd === null ? null : projectKeyOf(cwd),
+    inventory: {
+      mcp_servers: mcpServers.slice(0, MAX_ITEMS),
+      plugins: installed.map((plugin) => plugin.item).slice(0, MAX_ITEMS),
+      skills: skills.slice(0, MAX_ITEMS),
+      hooks: uniqueNames([
+        ...settings.flatMap((file) => hooksIn(file.value, file.scope)),
+        ...installed.flatMap(
+          (plugin) => plugin.item.enabled === false ? [] : pluginHooks(plugin.path, plugin.item.name)
+        )
+      ]).slice(0, MAX_ITEMS)
+    }
+  };
+}
+function projectKeyOf(cwd) {
+  return createHash("sha256").update(cwd).digest("hex").slice(0, PROJECT_KEY_CHARS);
+}
+function describeServer(config) {
+  const url = text(config.url);
+  const transport = text(config.type) ?? (url === void 0 ? "stdio" : "http");
+  if (url !== void 0) {
+    const origin = originOf(url);
+    return origin === void 0 ? { transport } : { transport, target: origin };
+  }
+  const command = text(config.command);
+  if (command === void 0) {
+    return { transport };
+  }
+  const program = basename2(command.replace(/\\/g, "/")).replace(/\.(exe|cmd|bat)$/i, "");
+  const args = Array.isArray(config.args) ? config.args : [];
+  const runs = PACKAGE_RUNNERS.has(program) ? packageIn(args) : void 0;
+  return { transport, target: runs === void 0 ? program : `${program} ${runs}` };
+}
+function packageIn(args) {
+  for (const arg of args) {
+    if (typeof arg !== "string") {
+      return void 0;
+    }
+    if (arg.startsWith("-") || RUNNER_SUBCOMMANDS.has(arg)) {
+      continue;
+    }
+    return arg.length <= MAX_PACKAGE_CHARS && PACKAGE.test(arg) ? arg : void 0;
+  }
+  return void 0;
+}
+function originOf(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" || parsed.protocol === "ws:" || parsed.protocol === "wss:" ? `${parsed.protocol}//${parsed.host}` : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function serversIn(value, scope, extra = {}) {
+  return Object.entries(record(value) ?? {}).flatMap(([name, config]) => {
+    const fields = record(config);
+    return fields === void 0 ? [] : [{ name, scope, ...describeServer(fields), ...extra }];
+  });
+}
+function projectServers(cwd, project) {
+  const enabled = strings(project?.enabledMcpjsonServers);
+  const disabled = strings(project?.disabledMcpjsonServers);
+  return serversIn(readJson(join2(cwd, ".mcp.json"))?.mcpServers, "project").map(
+    (server) => disabled.has(server.name) ? { ...server, enabled: false } : enabled.has(server.name) ? { ...server, enabled: true } : server
+  );
+}
+function pluginServers(path, plugin) {
+  const fromFile = (file) => {
+    const json = readJson(file);
+    return record(json?.mcpServers) ?? json;
+  };
+  const declared = readJson(join2(path, ".claude-plugin", "plugin.json"))?.mcpServers;
+  const declaredFile = typeof declared === "string" ? resolve(path, declared) : void 0;
+  const servers = declaredFile !== void 0 ? declaredFile.startsWith(resolve(path)) ? fromFile(declaredFile) : void 0 : record(declared) ?? fromFile(join2(path, ".mcp.json"));
+  return serversIn(servers, "plugin", { plugin });
+}
+function installedPlugins(configDir, cwd, enabledPlugins) {
+  const listed = record(readJson(join2(configDir, "plugins", "installed_plugins.json"))?.plugins);
+  return Object.entries(listed ?? {}).flatMap(([name, installs]) => {
+    const entries = Array.isArray(installs) ? installs : [installs];
+    return entries.flatMap((install) => {
+      const fields = record(install);
+      const scope = asScope(fields?.scope);
+      const path = text(fields?.installPath);
+      if (fields === void 0 || scope === void 0 || path === void 0) {
+        return [];
+      }
+      const projectPath = text(fields.projectPath);
+      if ((scope === "project" || scope === "local") && projectPath !== cwd) {
+        return [];
+      }
+      const version = text(fields.version);
+      const enabled = enabledPlugins[name];
+      return [
+        {
+          item: {
+            name,
+            scope,
+            ...version === void 0 ? {} : { version },
+            ...typeof enabled === "boolean" ? { enabled } : {}
+          },
+          path
+        }
+      ];
+    });
+  });
+}
+function skillsIn(dir, scope) {
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return names.filter((name) => !name.startsWith(".") && isFile(join2(dir, name, "SKILL.md"))).sort().map((name) => ({ name, scope }));
+}
+function hooksIn(settings, scope, plugin) {
+  if (settings === void 0) {
+    return [];
+  }
+  const disabled = settings.disableAllHooks === true ? [{ name: "disableAllHooks", scope, type: "disable_all" }] : [];
+  const events = record(settings.hooks) ?? {};
+  return [
+    ...disabled,
+    ...Object.entries(events).flatMap(
+      ([event, groups]) => (Array.isArray(groups) ? groups : []).flatMap((group) => {
+        const fields = record(group);
+        const matcher = text(fields?.matcher);
+        const handlers = Array.isArray(fields?.hooks) ? fields.hooks : [];
+        return handlers.flatMap((handler) => {
+          const hook = record(handler);
+          if (hook === void 0) {
+            return [];
+          }
+          const shape = describeHook(hook);
+          const label = `${event}${matcher === void 0 ? "" : ` (${matcher})`}`;
+          return [
+            {
+              name: `${label} \xB7 ${shape.target ?? shape.type}`,
+              scope,
+              event,
+              ...matcher === void 0 ? {} : { matcher },
+              ...shape,
+              ...plugin === void 0 ? {} : { plugin }
+            }
+          ];
+        });
+      })
+    )
+  ];
+}
+function pluginHooks(path, plugin) {
+  const declared = readJson(join2(path, ".claude-plugin", "plugin.json"))?.hooks;
+  const declaredFile = typeof declared === "string" ? resolve(path, declared) : void 0;
+  const settings = declaredFile !== void 0 ? declaredFile.startsWith(resolve(path)) ? readJson(declaredFile) : void 0 : record(declared) !== void 0 ? { hooks: declared } : readJson(join2(path, "hooks", "hooks.json"));
+  return hooksIn(settings === void 0 ? void 0 : { hooks: settings.hooks ?? settings }, "plugin", plugin);
+}
+function describeHook(hook) {
+  const command = text(hook.command);
+  const url = text(hook.url);
+  const type = text(hook.type) ?? (command === void 0 ? "unknown" : "command");
+  if (url !== void 0) {
+    const origin = originOf(url);
+    return { type, ...origin === void 0 ? {} : { target: origin } };
+  }
+  if (command === void 0) {
+    return { type };
+  }
+  const args = Array.isArray(hook.args) ? hook.args.filter((arg) => typeof arg === "string") : null;
+  const digest = createHash("sha256").update(args === null ? command : JSON.stringify([command, ...args])).digest("hex").slice(0, HOOK_DIGEST_CHARS);
+  const target = commandTarget(args === null ? splitWords(command) : [command, ...args]);
+  return { type, ...target === void 0 ? {} : { target }, digest };
+}
+function commandTarget(words) {
+  const first = words.findIndex((word) => !isAssignment(word));
+  if (first === -1) {
+    return void 0;
+  }
+  const program = fileName(words[first]);
+  const rest = words.slice(first + 1);
+  if (PACKAGE_RUNNERS.has(program)) {
+    const runs = packageIn(rest);
+    return runs === void 0 ? program : `${program} ${runs}`;
+  }
+  if (!INTERPRETERS.has(program)) {
+    return program;
+  }
+  for (const word of rest) {
+    if (INLINE_FLAGS.has(word)) {
+      return `${program} ${word}`;
+    }
+    if (word.startsWith("-")) {
+      continue;
+    }
+    const script = fileName(word);
+    return script.length > 0 && script.length <= MAX_PACKAGE_CHARS && PACKAGE.test(script) ? `${program} ${script}` : program;
+  }
+  return program;
+}
+function splitWords(command) {
+  const words = [];
+  let current = "";
+  let quote = null;
+  for (const character of command) {
+    if (quote !== null) {
+      if (character === quote) {
+        quote = null;
+      } else {
+        current += character;
+      }
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (/\s/.test(character)) {
+      if (current.length > 0) {
+        words.push(current);
+        current = "";
+      }
+    } else {
+      current += character;
+    }
+  }
+  if (current.length > 0) {
+    words.push(current);
+  }
+  return words;
+}
+function isAssignment(word) {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(word);
+}
+function fileName(word) {
+  return basename2(word.replace(/\\/g, "/")).replace(/\.(exe|cmd|bat)$/i, "");
+}
+function uniqueNames(hooks) {
+  const seen = /* @__PURE__ */ new Set();
+  return hooks.map((hook) => {
+    const identity = `${hook.scope}\0${hook.name}`;
+    if (!seen.has(identity)) {
+      seen.add(identity);
+      return hook;
+    }
+    const named = { ...hook, name: `${hook.name} #${hook.digest ?? seen.size}` };
+    seen.add(`${hook.scope}\0${named.name}`);
+    return named;
+  });
+}
+function syncedSkills(dir) {
+  let sources;
+  try {
+    sources = readdirSync(dir).filter((name) => !name.startsWith("."));
+  } catch {
+    return [];
+  }
+  const names = new Set(sources.flatMap((source) => skillsIn(join2(dir, source), "synced").map((skill) => skill.name)));
+  return [...names].sort().map((name) => ({ name, scope: "synced" }));
+}
+function pluginName(id) {
+  const at = id.indexOf("@");
+  return at > 0 ? id.slice(0, at) : id;
+}
+function asScope(value) {
+  return value === "user" || value === "local" || value === "project" || value === "managed" ? value : void 0;
+}
+function isFile(path) {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+function readJson(path) {
+  if (path === "" || !isAbsolute(path)) {
+    return void 0;
+  }
+  try {
+    return record(JSON.parse(readFileSync2(path, "utf8")));
+  } catch {
+    return void 0;
+  }
+}
+function record(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+}
+function text(value) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : void 0;
+}
+function strings(value) {
+  return new Set(Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : []);
 }
 
 // src/handlers.ts
@@ -169,11 +568,11 @@ var BatchTransport = class {
     return this.queue.length;
   }
   /** Queue a record. Never throws and never blocks the caller. */
-  enqueue(record) {
+  enqueue(record2) {
     if (!this.config.enabled || this.closed) {
       return;
     }
-    this.queue.push(record);
+    this.queue.push(record2);
     if (this.queue.length > this.config.maxQueueSize) {
       this.queue.splice(0, this.queue.length - this.config.maxQueueSize);
     }
@@ -331,8 +730,8 @@ var DetectionClient = class {
    * plane is unreachable, rejects the key, or returns a body that cannot be
    * trusted. A malformed verdict is never coerced into an allow.
    */
-  async scan(text, options = {}) {
-    const body = { text };
+  async scan(text2, options = {}) {
+    const body = { text: text2 };
     if (this.config.blockSeverity !== void 0) {
       body.block_severity = this.config.blockSeverity;
     }
@@ -367,7 +766,7 @@ var DetectionClient = class {
         "scan_failed"
       );
     }
-    const result = parseVerdict(await readJson(response));
+    const result = parseVerdict(await readJson2(response));
     this.version = result.signatureVersion;
     return result;
   }
@@ -381,9 +780,9 @@ var DetectionClient = class {
    * is unreachable, cannot reach its detector, or returns a body that cannot be
    * trusted. An answer that is not an answer is never read as "found nothing".
    */
-  async cloakDetect(text, options = {}) {
+  async cloakDetect(text2, options = {}) {
     const body = {
-      text,
+      text: text2,
       ...cloakRequestBody(options)
     };
     delete body.skip_when_blocked;
@@ -400,7 +799,7 @@ var DetectionClient = class {
         "scan_failed"
       );
     }
-    return parseCloakResponse(await readJson(response));
+    return parseCloakResponse(await readJson2(response));
   }
   /**
    * Confirm the API key and report the caller behind it.
@@ -436,7 +835,7 @@ var DetectionClient = class {
         "scan_failed"
       );
     }
-    return parsePrincipal(await readJson(response));
+    return parsePrincipal(await readJson2(response));
   }
   /** Issue a request, bounded by the configured timeout. */
   async request(path, method, body) {
@@ -467,39 +866,39 @@ var DetectionClient = class {
     }
   }
 };
-async function readJson(response) {
-  const text = await response.text();
+async function readJson2(response) {
+  const text2 = await response.text();
   try {
-    return JSON.parse(text);
+    return JSON.parse(text2);
   } catch {
     throw invalid("The control plane returned a body that is not JSON.");
   }
 }
 function parseVerdict(value) {
-  const record = asRecord(value, "verdict");
-  const decision = asString(record.decision, "decision");
+  const record2 = asRecord(value, "verdict");
+  const decision = asString(record2.decision, "decision");
   if (decision !== "allow" && decision !== "block") {
     throw invalid(`Unknown decision "${decision}".`);
   }
-  const severity = parseSeverity(record.severity, "severity");
-  const categories = parseCategories(record.categories);
-  const toolValidation = parseToolValidation(record.tool_validation);
-  const modelCheck = parseModelCheck(record.model_check);
-  const cloak = parseCloakBlock(record.cloak);
-  const quota = parseQuota(record.quota);
-  const rawMatches = record.matches;
+  const severity = parseSeverity(record2.severity, "severity");
+  const categories = parseCategories(record2.categories);
+  const toolValidation = parseToolValidation(record2.tool_validation);
+  const modelCheck = parseModelCheck(record2.model_check);
+  const cloak = parseCloakBlock(record2.cloak);
+  const quota = parseQuota(record2.quota);
+  const rawMatches = record2.matches;
   if (!Array.isArray(rawMatches)) {
     throw invalid("verdict.matches is not an array.");
   }
   return {
     decision,
-    blocked: asBoolean(record.blocked, "blocked"),
-    reason: asNullableString(record.reason, "reason"),
+    blocked: asBoolean(record2.blocked, "blocked"),
+    reason: asNullableString(record2.reason, "reason"),
     severity,
     categories,
     matches: rawMatches.map(parseMatch),
-    scannedChars: asNumber(record.scanned_chars, "scanned_chars"),
-    signatureVersion: asString(record.signature_version, "signature_version"),
+    scannedChars: asNumber(record2.scanned_chars, "scanned_chars"),
+    signatureVersion: asString(record2.signature_version, "signature_version"),
     ...toolValidation === void 0 ? {} : { toolValidation },
     ...modelCheck === void 0 ? {} : { modelCheck },
     ...cloak === void 0 ? {} : { cloak },
@@ -517,34 +916,34 @@ function parseCloakBlock(value) {
   if (value === void 0) {
     return void 0;
   }
-  const record = asRecord(value, "cloak");
-  const rawEntities = record.entities;
+  const record2 = asRecord(value, "cloak");
+  const rawEntities = record2.entities;
   if (!Array.isArray(rawEntities)) {
     throw invalid("cloak.entities is not an array.");
   }
-  const latency = record.latency_ms;
-  const error = record.error;
+  const latency = record2.latency_ms;
+  const error = record2.error;
   return {
-    ran: asBoolean(record.ran, "cloak.ran"),
+    ran: asBoolean(record2.ran, "cloak.ran"),
     entities: rawEntities.map(parseCloakEntity),
-    taxonomyVersion: asString(record.taxonomy_version, "cloak.taxonomy_version"),
+    taxonomyVersion: asString(record2.taxonomy_version, "cloak.taxonomy_version"),
     latencyMs: latency === null ? null : asNumber(latency, "cloak.latency_ms"),
     error: error === null ? null : asString(error, "cloak.error")
   };
 }
 function parseCloakResponse(value) {
-  const record = asRecord(value, "cloak response");
-  const rawEntities = record.entities;
+  const record2 = asRecord(value, "cloak response");
+  const rawEntities = record2.entities;
   if (!Array.isArray(rawEntities)) {
     throw invalid("cloak response entities is not an array.");
   }
-  const ner = asRecord(record.ner, "cloak response ner");
+  const ner = asRecord(record2.ner, "cloak response ner");
   const latency = ner.latency_ms;
   return {
     ran: asBoolean(ner.ran, "cloak response ner.ran"),
     entities: rawEntities.map(parseCloakEntity),
     taxonomyVersion: asString(
-      record.taxonomy_version,
+      record2.taxonomy_version,
       "cloak response taxonomy_version"
     ),
     latencyMs: latency === null ? null : asNumber(latency, "cloak response latency_ms"),
@@ -553,17 +952,17 @@ function parseCloakResponse(value) {
 }
 function parseCloakEntity(value, index) {
   const label = `cloak.entities[${index}]`;
-  const record = asRecord(value, label);
-  const type = asString(record.type, `${label}.type`);
+  const record2 = asRecord(value, label);
+  const type = asString(record2.type, `${label}.type`);
   if (!ENTITY_TYPES.includes(type) && !isCustomEntityType(type)) {
     throw invalid(`Unknown entity type "${type}".`);
   }
-  const category = asString(record.category, `${label}.category`);
+  const category = asString(record2.category, `${label}.category`);
   if (!ENTITY_CATEGORIES.includes(category)) {
     throw invalid(`Unknown entity category "${category}".`);
   }
-  const start = asNumber(record.start, `${label}.start`);
-  const end = asNumber(record.end, `${label}.end`);
+  const start = asNumber(record2.start, `${label}.start`);
+  const end = asNumber(record2.end, `${label}.end`);
   if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) {
     throw invalid(`${label} has an invalid range.`);
   }
@@ -572,30 +971,30 @@ function parseCloakEntity(value, index) {
     category,
     start,
     end,
-    confidence: asNumber(record.confidence, `${label}.confidence`)
+    confidence: asNumber(record2.confidence, `${label}.confidence`)
   };
 }
 function parseModelCheck(value) {
   if (value === void 0) {
     return void 0;
   }
-  const record = asRecord(value, "model_check");
-  const verdict = record.verdict;
+  const record2 = asRecord(value, "model_check");
+  const verdict = record2.verdict;
   if (verdict !== null && verdict !== "safe" && verdict !== "unsafe") {
     throw invalid(`Unknown model_check.verdict ${JSON.stringify(verdict)}.`);
   }
-  const rawReasons = record.reasons;
+  const rawReasons = record2.reasons;
   if (!Array.isArray(rawReasons)) {
     throw invalid("model_check.reasons is not an array.");
   }
-  const rawCategories = record.categories;
+  const rawCategories = record2.categories;
   if (!Array.isArray(rawCategories)) {
     throw invalid("model_check.categories is not an array.");
   }
-  const latency = record.latency_ms;
-  const error = record.error;
+  const latency = record2.latency_ms;
+  const error = record2.error;
   return {
-    ran: asBoolean(record.ran, "model_check.ran"),
+    ran: asBoolean(record2.ran, "model_check.ran"),
     verdict,
     reasons: rawReasons.map(
       (entry, index) => asString(entry, `model_check.reasons[${index}]`)
@@ -603,9 +1002,9 @@ function parseModelCheck(value) {
     categories: rawCategories.map(
       (entry, index) => parseCategory(entry, `model_check.categories[${index}]`)
     ),
-    severity: parseSeverity(record.severity, "model_check.severity"),
+    severity: parseSeverity(record2.severity, "model_check.severity"),
     latencyMs: latency === null ? null : asNumber(latency, "model_check.latency_ms"),
-    truncated: asBoolean(record.truncated, "model_check.truncated"),
+    truncated: asBoolean(record2.truncated, "model_check.truncated"),
     error: error === null ? null : asString(error, "model_check.error")
   };
 }
@@ -613,97 +1012,97 @@ function parseQuota(value) {
   if (value === void 0) {
     return void 0;
   }
-  const record = asRecord(value, "quota");
+  const record2 = asRecord(value, "quota");
   return {
-    plan: asString(record.plan, "quota.plan"),
-    period: asString(record.period, "quota.period"),
-    aho: parseQuotaStage(record.aho, "quota.aho"),
-    ai: parseQuotaStage(record.ai, "quota.ai"),
-    overflow: asNumber(record.overflow, "quota.overflow"),
+    plan: asString(record2.plan, "quota.plan"),
+    period: asString(record2.period, "quota.period"),
+    aho: parseQuotaStage(record2.aho, "quota.aho"),
+    ai: parseQuotaStage(record2.ai, "quota.ai"),
+    overflow: asNumber(record2.overflow, "quota.overflow"),
     enforcementWithheld: asBoolean(
-      record.enforcement_withheld,
+      record2.enforcement_withheld,
       "quota.enforcement_withheld"
     )
   };
 }
 function parseQuotaStage(value, label) {
-  const record = asRecord(value, label);
+  const record2 = asRecord(value, label);
   return {
-    scans: parseQuotaCounter(record.scans, `${label}.scans`),
-    blocks: parseQuotaCounter(record.blocks, `${label}.blocks`)
+    scans: parseQuotaCounter(record2.scans, `${label}.scans`),
+    blocks: parseQuotaCounter(record2.blocks, `${label}.blocks`)
   };
 }
 function parseQuotaCounter(value, label) {
-  const record = asRecord(value, label);
+  const record2 = asRecord(value, label);
   return {
-    used: asNumber(record.used, `${label}.used`),
-    limit: asNullableNumber(record.limit, `${label}.limit`),
-    remaining: asNullableNumber(record.remaining, `${label}.remaining`)
+    used: asNumber(record2.used, `${label}.used`),
+    limit: asNullableNumber(record2.limit, `${label}.limit`),
+    remaining: asNullableNumber(record2.remaining, `${label}.remaining`)
   };
 }
 function parseMatch(value, index) {
-  const record = asRecord(value, `matches[${index}]`);
+  const record2 = asRecord(value, `matches[${index}]`);
   const label = `matches[${index}]`;
   const match = {
-    signatureId: asString(record.signature_id, `${label}.signature_id`),
-    category: parseCategory(record.category, `${label}.category`),
-    severity: parseSeverity(record.severity, `${label}.severity`) ?? "medium",
-    start: asNumber(record.start, `${label}.start`),
-    end: asNumber(record.end, `${label}.end`)
+    signatureId: asString(record2.signature_id, `${label}.signature_id`),
+    category: parseCategory(record2.category, `${label}.category`),
+    severity: parseSeverity(record2.severity, `${label}.severity`) ?? "medium",
+    start: asNumber(record2.start, `${label}.start`),
+    end: asNumber(record2.end, `${label}.end`)
   };
-  const evidence = record.evidence;
+  const evidence = record2.evidence;
   return typeof evidence === "string" ? { ...match, evidence } : match;
 }
 function parseToolValidation(value) {
   if (value === void 0) {
     return void 0;
   }
-  const record = asRecord(value, "tool_validation");
-  const rawCalls = record.calls;
+  const record2 = asRecord(value, "tool_validation");
+  const rawCalls = record2.calls;
   if (!Array.isArray(rawCalls)) {
     throw invalid("tool_validation.calls is not an array.");
   }
-  const modelCheck = parseModelCheck(record.model_check);
+  const modelCheck = parseModelCheck(record2.model_check);
   return {
-    allowed: asBoolean(record.allowed, "tool_validation.allowed"),
-    severity: parseSeverity(record.severity, "tool_validation.severity"),
+    allowed: asBoolean(record2.allowed, "tool_validation.allowed"),
+    severity: parseSeverity(record2.severity, "tool_validation.severity"),
     calls: rawCalls.map(parseToolCallVerdict),
     ...modelCheck === void 0 ? {} : { modelCheck }
   };
 }
 function parseToolCallVerdict(value, index) {
   const label = `tool_validation.calls[${index}]`;
-  const record = asRecord(value, label);
-  const rawFindings = record.findings;
+  const record2 = asRecord(value, label);
+  const rawFindings = record2.findings;
   if (!Array.isArray(rawFindings)) {
     throw invalid(`${label}.findings is not an array.`);
   }
   const verdict = {
-    callIndex: asNumber(record.call_index, `${label}.call_index`),
-    tool: asString(record.tool, `${label}.tool`),
-    allowed: asBoolean(record.allowed, `${label}.allowed`),
-    severity: parseSeverity(record.severity, `${label}.severity`),
+    callIndex: asNumber(record2.call_index, `${label}.call_index`),
+    tool: asString(record2.tool, `${label}.tool`),
+    allowed: asBoolean(record2.allowed, `${label}.allowed`),
+    severity: parseSeverity(record2.severity, `${label}.severity`),
     findings: rawFindings.map(
       (entry, position) => parseToolFinding(entry, `${label}.findings[${position}]`)
     )
   };
-  const redacted = record.redacted_arguments;
+  const redacted = record2.redacted_arguments;
   return typeof redacted === "string" ? { ...verdict, redactedArguments: redacted } : verdict;
 }
 function parseToolFinding(value, label) {
-  const record = asRecord(value, label);
+  const record2 = asRecord(value, label);
   const finding = {
-    code: parseToolFindingCode(record.code, `${label}.code`),
-    severity: parseSeverity(record.severity, `${label}.severity`) ?? "medium",
-    callIndex: asNumber(record.call_index, `${label}.call_index`),
-    tool: asString(record.tool, `${label}.tool`),
-    detail: asString(record.detail, `${label}.detail`)
+    code: parseToolFindingCode(record2.code, `${label}.code`),
+    severity: parseSeverity(record2.severity, `${label}.severity`) ?? "medium",
+    callIndex: asNumber(record2.call_index, `${label}.call_index`),
+    tool: asString(record2.tool, `${label}.tool`),
+    detail: asString(record2.detail, `${label}.detail`)
   };
-  const argument = record.argument;
-  const signatureId = record.signature_id;
-  const category = record.category;
-  const start = record.start;
-  const end = record.end;
+  const argument = record2.argument;
+  const signatureId = record2.signature_id;
+  const category = record2.category;
+  const start = record2.start;
+  const end = record2.end;
   return {
     ...finding,
     ...typeof argument === "string" ? { argument } : {},
@@ -717,12 +1116,12 @@ function parseToolFindingCode(value, label) {
   return parseCategoryLike(value, label, TOOL_FINDING_CODES);
 }
 function parsePrincipal(value) {
-  const record = asRecord(value, "principal");
+  const record2 = asRecord(value, "principal");
   return {
-    keyId: asString(record.key_id, "key_id"),
-    tenantId: asString(record.tenant_id, "tenant_id"),
-    keyName: asString(record.key_name, "key_name"),
-    captureEnabled: asBoolean(record.capture_enabled, "capture_enabled")
+    keyId: asString(record2.key_id, "key_id"),
+    tenantId: asString(record2.tenant_id, "tenant_id"),
+    keyName: asString(record2.key_name, "key_name"),
+    captureEnabled: asBoolean(record2.capture_enabled, "capture_enabled")
   };
 }
 function parseSeverity(value, label) {
@@ -940,8 +1339,8 @@ function hmacSha256(key, message) {
   outer.set(sha256(inner), BLOCK_BYTES);
   return sha256(outer);
 }
-function utf8(text) {
-  return new TextEncoder().encode(text);
+function utf8(text2) {
+  return new TextEncoder().encode(text2);
 }
 function toHex(bytes) {
   let out = "";
@@ -1124,13 +1523,13 @@ function invalid2(message) {
   return new FrostWolfError(`Invalid Cloak options: ${message}`, "invalid_option");
 }
 var MAX_DEPTH = 64;
-async function restoreText(text, deps) {
+async function restoreText(text2, deps) {
   const found = /* @__PURE__ */ new Set();
-  for (const match of text.matchAll(tokenPattern())) {
+  for (const match of text2.matchAll(tokenPattern())) {
     found.add(match[0]);
   }
   if (found.size === 0) {
-    return { text, restored: 0, unknown: 0, denied: 0 };
+    return { text: text2, restored: 0, unknown: 0, denied: 0 };
   }
   const values = /* @__PURE__ */ new Map();
   for (const token of found) {
@@ -1146,7 +1545,7 @@ async function restoreText(text, deps) {
   let restored = 0;
   let unknown = 0;
   let denied = 0;
-  const out = text.replace(tokenPattern(), (token) => {
+  const out = text2.replace(tokenPattern(), (token) => {
     const value = values.get(token);
     if (value === null || value === void 0) {
       unknown++;
@@ -1536,18 +1935,18 @@ function partsOf(content) {
         continue;
       }
       if (part !== null && typeof part === "object" && "text" in part) {
-        const text = part.text;
-        if (typeof text === "string") {
-          parts.push(text);
+        const text2 = part.text;
+        if (typeof text2 === "string") {
+          parts.push(text2);
         }
       }
     }
     return parts;
   }
   if (content !== null && typeof content === "object" && "text" in content) {
-    const text = content.text;
-    if (typeof text === "string") {
-      return [text];
+    const text2 = content.text;
+    if (typeof text2 === "string") {
+      return [text2];
     }
   }
   return [];
@@ -1566,9 +1965,9 @@ function normalizeInput(input) {
   const conversation = [];
   for (const message of input.messages ?? []) {
     if (message.role === "system") {
-      const text = textOf(message.content);
-      if (text.length > 0) {
-        systemParts.push(text);
+      const text2 = textOf(message.content);
+      if (text2.length > 0) {
+        systemParts.push(text2);
       }
       continue;
     }
@@ -1622,25 +2021,25 @@ function mergeSpans(spans) {
   merged.push({ start: currentStart, end: currentEnd });
   return merged;
 }
-function redact(text, spans, replacement) {
+function redact(text2, spans, replacement) {
   if (spans.length === 0) {
-    return { text, redacted: 0 };
+    return { text: text2, redacted: 0 };
   }
   const merged = mergeSpans(spans);
   if (merged.length === 0) {
-    return { text, redacted: 0 };
+    return { text: text2, redacted: 0 };
   }
   const parts = [];
   let cursor = 0;
   for (const span of merged) {
     if (span.start > cursor) {
-      parts.push(text.slice(cursor, span.start));
+      parts.push(text2.slice(cursor, span.start));
     }
     parts.push(replacement);
     cursor = span.end;
   }
-  if (cursor < text.length) {
-    parts.push(text.slice(cursor));
+  if (cursor < text2.length) {
+    parts.push(text2.slice(cursor));
   }
   return { text: parts.join(""), redacted: merged.length };
 }
@@ -1660,7 +2059,7 @@ function mergeEdits(edits) {
   }
   return merged;
 }
-function editWithin(text, edits, from, to) {
+function editWithin(text2, edits, from, to) {
   const clipped = [];
   for (const edit of edits) {
     const start = Math.max(edit.start, from);
@@ -1674,25 +2073,25 @@ function editWithin(text, edits, from, to) {
     }
   }
   if (clipped.length === 0) {
-    return { text, redacted: 0 };
+    return { text: text2, redacted: 0 };
   }
   const merged = mergeEdits(clipped);
   const parts = [];
   let cursor = 0;
   for (const edit of merged) {
     if (edit.start > cursor) {
-      parts.push(text.slice(cursor, edit.start));
+      parts.push(text2.slice(cursor, edit.start));
     }
     parts.push(edit.replacement);
     cursor = edit.end;
   }
-  if (cursor < text.length) {
-    parts.push(text.slice(cursor));
+  if (cursor < text2.length) {
+    parts.push(text2.slice(cursor));
   }
   return { text: parts.join(""), redacted: merged.length };
 }
-function applyEdits(text, edits) {
-  return editWithin(text, edits, 0, text.length);
+function applyEdits(text2, edits) {
+  return editWithin(text2, edits, 0, text2.length);
 }
 function isEmptyUnit(parts) {
   if (parts.length === 0) {
@@ -1705,21 +2104,21 @@ function isEmptyUnit(parts) {
 }
 function buildPlan(input) {
   const normalized = normalizeInput(input);
-  let text = "";
+  let text2 = "";
   let hasUnit = false;
   const appendUnit = (parts) => {
     if (hasUnit) {
-      text += "\n";
+      text2 += "\n";
     }
     hasUnit = true;
     const slots = [];
     for (let i = 0; i < parts.length; i++) {
       if (i > 0) {
-        text += "\n";
+        text2 += "\n";
       }
-      const start = text.length;
-      text += parts[i];
-      slots.push({ text: parts[i], start, end: text.length });
+      const start = text2.length;
+      text2 += parts[i];
+      slots.push({ text: parts[i], start, end: text2.length });
     }
     return slots;
   };
@@ -1737,7 +2136,7 @@ function buildPlan(input) {
       slots
     });
   }
-  return { text, system, messages };
+  return { text: text2, system, messages };
 }
 function rebuildContent(content, redacted) {
   if (typeof content === "string") {
@@ -1750,11 +2149,11 @@ function rebuildContent(content, redacted) {
         return redacted[index++] ?? part;
       }
       if (part !== null && typeof part === "object" && "text" in part) {
-        const text = part.text;
-        if (typeof text === "string") {
+        const text2 = part.text;
+        if (typeof text2 === "string") {
           return {
             ...part,
-            text: redacted[index++] ?? text
+            text: redacted[index++] ?? text2
           };
         }
       }
@@ -1762,11 +2161,11 @@ function rebuildContent(content, redacted) {
     });
   }
   if (content !== null && typeof content === "object" && "text" in content) {
-    const text = content.text;
-    if (typeof text === "string") {
+    const text2 = content.text;
+    if (typeof text2 === "string") {
       return {
         ...content,
-        text: redacted[0] ?? text
+        text: redacted[0] ?? text2
       };
     }
   }
@@ -1812,12 +2211,12 @@ function editPlan(plan, edits) {
 }
 var PARTIAL_TOKEN = /\[(?:\[(?:[a-z_]{1,40}(?::[0-9a-f]{0,64}\]?)?)?)?$/;
 var KEEPALIVE_TYPES = /* @__PURE__ */ new Set(["ping"]);
-function splitHeld(text) {
-  const match = PARTIAL_TOKEN.exec(text);
+function splitHeld(text2) {
+  const match = PARTIAL_TOKEN.exec(text2);
   if (match === null) {
-    return [text, ""];
+    return [text2, ""];
   }
-  return [text.slice(0, match.index), text.slice(match.index)];
+  return [text2.slice(0, match.index), text2.slice(match.index)];
 }
 function deltaSlotsOf(chunk) {
   if (!isRecord(chunk)) {
@@ -1949,8 +2348,8 @@ async function* restoreStream(stream, deps) {
       }
       let out = chunk;
       for (const slot of slots) {
-        const text = `${held.get(slot.channel) ?? ""}${String(getAt(chunk, slot.path))}`;
-        const [now, later] = splitHeld(text);
+        const text2 = `${held.get(slot.channel) ?? ""}${String(getAt(chunk, slot.path))}`;
+        const [now, later] = splitHeld(text2);
         held.set(slot.channel, later);
         last.set(slot.channel, { chunk, slot });
         const done = await deps.restoreText(now);
@@ -1984,12 +2383,12 @@ function setAt(root, path, value, depth = 0) {
     list[key] = setAt(list[key], path, value, depth + 1);
     return list;
   }
-  const record = Object.assign(
+  const record2 = Object.assign(
     Object.create(Object.getPrototypeOf(root ?? {})),
     root
   );
-  record[key] = setAt(record[key], path, value, depth + 1);
-  return record;
+  record2[key] = setAt(record2[key], path, value, depth + 1);
+  return record2;
 }
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -2189,8 +2588,8 @@ var CloakNamespace = class {
   streamDeps(options) {
     const engine = this.config.engine;
     return {
-      restoreText: async (text) => {
-        const done = await engine.restore(text, options.context, "leave");
+      restoreText: async (text2) => {
+        const done = await engine.restore(text2, options.context, "leave");
         return { ...done, text: done.value };
       },
       restoreValue: (value) => engine.restore(value, options.context, "leave"),
@@ -2274,9 +2673,9 @@ function collectBlock(block, base, found) {
   if (!isPlainObject2(block)) {
     return;
   }
-  const text = block.text;
-  if (typeof text === "string" && text.length > 0) {
-    found.push({ text, path: [...base, "text"] });
+  const text2 = block.text;
+  if (typeof text2 === "string" && text2.length > 0) {
+    found.push({ text: text2, path: [...base, "text"] });
   }
   const content = block.content;
   if (typeof content === "string") {
@@ -2442,21 +2841,21 @@ function collect(request2) {
 function planRequest(request2) {
   const found = collect(request2);
   const slots = [];
-  let text = "";
+  let text2 = "";
   for (const entry of found) {
-    if (text.length > 0) {
-      text += "\n";
+    if (text2.length > 0) {
+      text2 += "\n";
     }
-    const start = text.length;
-    text += entry.text;
+    const start = text2.length;
+    text2 += entry.text;
     slots.push({
       path: entry.path,
       text: entry.text,
       start,
-      end: text.length
+      end: text2.length
     });
   }
-  return { text, slots };
+  return { text: text2, slots };
 }
 function setAtPath(root, path, depth, value) {
   if (depth === path.length) {
@@ -2468,9 +2867,9 @@ function setAtPath(root, path, depth, value) {
     list[head] = setAtPath(list[head], path, depth + 1, value);
     return list;
   }
-  const record = isPlainObject2(root) ? { ...root } : {};
-  record[head] = setAtPath(record[head], path, depth + 1, value);
-  return record;
+  const record2 = isPlainObject2(root) ? { ...root } : {};
+  record2[head] = setAtPath(record2[head], path, depth + 1, value);
+  return record2;
 }
 function editRequest(request2, plan, edits) {
   if (edits.length === 0) {
@@ -3197,13 +3596,13 @@ function serialize(value, maxChars) {
   if (value === void 0) {
     return void 0;
   }
-  let text;
+  let text2;
   try {
-    text = JSON.stringify(value) ?? String(value);
+    text2 = JSON.stringify(value) ?? String(value);
   } catch {
     return void 0;
   }
-  return text.length > maxChars ? text.slice(0, maxChars) : text;
+  return text2.length > maxChars ? text2.slice(0, maxChars) : text2;
 }
 function emitCapture(context, capture, fields) {
   if (!capture.enabled) {
@@ -3269,16 +3668,16 @@ function createGuardedFetch(decorate, options = {}) {
           upstream.stream = { named: false };
           return readEvents(response, host, upstream.stream);
         }
-        const text = await response.text();
+        const text2 = await response.text();
         try {
-          return JSON.parse(text);
+          return JSON.parse(text2);
         } catch {
-          return new Untouched(rebuilt(host, response, text));
+          return new Untouched(rebuilt(host, response, text2));
         }
       },
       {
         ...decorateOptions,
-        baseUrl: decorateOptions.baseUrl ?? originOf(request2.url),
+        baseUrl: decorateOptions.baseUrl ?? originOf2(request2.url),
         ...decorateOptions.provider === void 0 ? providerOf(request2.url) : {}
       }
     );
@@ -3440,7 +3839,7 @@ function isBlocked(value) {
   const error = value?.error;
   return error?.code === BLOCKED_CODE;
 }
-function originOf(url) {
+function originOf2(url) {
   const match = /^[a-z]+:\/\/[^/]+/i.exec(url);
   return match?.[0];
 }
@@ -3492,7 +3891,7 @@ var GuardNamespace = class {
     this.engine = new CloakEngine(config.options.cloak);
     this.cloak = new CloakNamespace({
       engine: this.engine,
-      detect: (text, options) => this.detect.cloakDetect(text, options),
+      detect: (text2, options) => this.detect.cloakDetect(text2, options),
       protect: (input, options) => this.protect(input, options),
       emit: config.emit,
       nextEventId: config.nextEventId,
@@ -3670,7 +4069,7 @@ var GuardNamespace = class {
   decorate(fn, options = {}) {
     return decorateCompletion(
       {
-        inspect: (text, options2) => this.inspect(text, options2),
+        inspect: (text2, options2) => this.inspect(text2, options2),
         action: this.matchAction,
         replacement: this.replacement,
         includeEvidence: this.includeEvidence,
@@ -3770,9 +4169,9 @@ var GuardNamespace = class {
    * `onError` and then resolved by `onScanError`, so the caller's request path
    * has exactly one failure mode to reason about instead of two.
    */
-  async inspect(text, options = {}) {
+  async inspect(text2, options = {}) {
     try {
-      const result = await this.detect.scan(text, options);
+      const result = await this.detect.scan(text2, options);
       this.onDecision?.(result);
       return result;
     } catch (error) {
@@ -3910,9 +4309,9 @@ var GuardNamespace = class {
     };
   }
   /** Detect personal data without the attack check, resolving a failure. */
-  async detectCloak(text, cloak) {
+  async detectCloak(text2, cloak) {
     try {
-      return await this.detect.cloakDetect(text, {
+      return await this.detect.cloakDetect(text2, {
         ...cloak.entities === void 0 ? {} : { entities: cloak.entities },
         ...cloak.minConfidence === void 0 ? {} : { minConfidence: cloak.minConfidence }
       });
@@ -4117,7 +4516,7 @@ var FrostWolfClient = class {
       onScanError: options.onScanError ?? "block",
       detect: this.detect,
       emit: (event) => this.telemetry.enqueue(event),
-      captureRecord: (record) => this.capture?.enqueue(record),
+      captureRecord: (record2) => this.capture?.enqueue(record2),
       nextEventId: createEventIdFactory(),
       onError
     });
@@ -4243,31 +4642,31 @@ function validSource(source) {
 }
 
 // src/guard.ts
-import { createHash, randomBytes } from "crypto";
+import { createHash as createHash2, randomBytes } from "crypto";
 
 // src/chunks.ts
 var MAX_DETECT_CHARS = 12e3;
 var SEPARATOR_LENGTH = 1;
-function splitText(text, limit) {
+function splitText(text2, limit) {
   const pieces = [];
   let start = 0;
-  while (text.length - start > limit) {
+  while (text2.length - start > limit) {
     let end = start + limit;
-    const newline = text.lastIndexOf("\n", end - 1);
+    const newline = text2.lastIndexOf("\n", end - 1);
     if (newline >= start) {
       end = newline + 1;
-    } else if (isHighSurrogate(text.charCodeAt(end - 1))) {
+    } else if (isHighSurrogate(text2.charCodeAt(end - 1))) {
       end -= 1;
     }
-    pieces.push(text.slice(start, end));
+    pieces.push(text2.slice(start, end));
     start = end;
   }
-  pieces.push(text.slice(start));
+  pieces.push(text2.slice(start));
   return pieces;
 }
 function piecesOf(texts, limit) {
   return texts.flatMap(
-    (text, source) => splitText(text, limit).map((piece) => ({ source, text: piece }))
+    (text2, source) => splitText(text2, limit).map((piece) => ({ source, text: piece }))
   );
 }
 function packPieces(pieces, limit) {
@@ -4374,7 +4773,7 @@ var AgentGuard = class {
     );
     return {
       texts: rewritten,
-      changed: rewritten.some((text, index) => text !== texts[index]),
+      changed: rewritten.some((text2, index) => text2 !== texts[index]),
       replaced,
       attack: strongest(outcomes.map((outcome) => outcome.attack)),
       unavailable: outcomes.find((outcome) => outcome.unavailable !== null)?.unavailable ?? null
@@ -4400,7 +4799,7 @@ var AgentGuard = class {
     return this.client.close();
   }
   async checkCached(pieces, context, onMatch, semanticPass) {
-    const key = createHash("sha256").update(
+    const key = createHash2("sha256").update(
       JSON.stringify([
         context.subject,
         context.scope ?? "",
@@ -4432,11 +4831,11 @@ var AgentGuard = class {
   }
   async checkBatch(pieces, context, onMatch, semanticPass) {
     const originalTexts = pieces.map((piece) => piece.text);
-    if (originalTexts.every((text) => text.length === 0)) {
+    if (originalTexts.every((text2) => text2.length === 0)) {
       return untouched(originalTexts, null);
     }
     const input = {
-      messages: originalTexts.map((text) => ({ role: "user", content: text }))
+      messages: originalTexts.map((text2) => ({ role: "user", content: text2 }))
     };
     const plan = buildPlan(input);
     const result = await this.client.guard.protect(input, {
@@ -4490,7 +4889,7 @@ function putBack(texts, replaced, keep) {
   }
   let restored = [...texts];
   for (const entry of kept) {
-    restored = restored.map((text) => text.replaceAll(entry.replacement, entry.original));
+    restored = restored.map((text2) => text2.replaceAll(entry.replacement, entry.original));
   }
   return { texts: restored, replaced: replaced.filter((entry) => !kept.includes(entry)) };
 }
@@ -4576,18 +4975,18 @@ var TooDeepError = class extends Error {
 };
 function stringsOf(value) {
   const out = [];
-  mapStrings(value, (text) => {
-    out.push(text);
-    return text;
+  mapStrings(value, (text2) => {
+    out.push(text2);
+    return text2;
   });
   return out;
 }
 function withStrings(value, texts) {
   let index = 0;
-  const result = mapStrings(value, (text) => {
+  const result = mapStrings(value, (text2) => {
     const replacement = texts[index];
     index++;
-    return replacement ?? text;
+    return replacement ?? text2;
   });
   return result;
 }
@@ -4604,21 +5003,21 @@ function mapStrings(value, map, depth = 0) {
   if (Array.isArray(value)) {
     return value.map((item) => mapStrings(item, map, depth + 1));
   }
-  const record = value;
+  const record2 = value;
   const out = {};
-  for (const [key, item] of Object.entries(record)) {
-    out[key] = isBinary(record, key) && typeof item === "string" ? item : mapStrings(item, map, depth + 1);
+  for (const [key, item] of Object.entries(record2)) {
+    out[key] = isBinary(record2, key) && typeof item === "string" ? item : mapStrings(item, map, depth + 1);
   }
   return out;
 }
-function isBinary(record, key) {
-  return BINARY_KEYS.has(key) || key === BASE64_SOURCE_DATA_KEY && record.type === "base64";
+function isBinary(record2, key) {
+  return BINARY_KEYS.has(key) || key === BASE64_SOURCE_DATA_KEY && record2.type === "base64";
 }
 
 // src/mentions.ts
 import { readFile, stat } from "fs/promises";
 import { homedir } from "os";
-import { isAbsolute, relative, resolve } from "path";
+import { isAbsolute as isAbsolute2, relative, resolve as resolve2 } from "path";
 var MENTION = /(?<=^|\s)@(\S+)/g;
 var TRAILING_PUNCTUATION = /[.,;:!?)\]}'"`]+$/;
 var LINE_RANGE = /#L?\d+(?:-L?\d+)?$/;
@@ -4646,9 +5045,9 @@ async function attachedFiles(prompt, cwd) {
         found.push({ mention, label, tooLarge: true });
         break;
       }
-      const text = await readFile(path, "utf8").catch(() => null);
-      if (text !== null && !text.includes(NUL)) {
-        found.push({ mention, label, text });
+      const text2 = await readFile(path, "utf8").catch(() => null);
+      if (text2 !== null && !text2.includes(NUL)) {
+        found.push({ mention, label, text: text2 });
       }
       break;
     }
@@ -4671,13 +5070,13 @@ function candidatesOf(word) {
 }
 function resolvePath(candidate, base) {
   if (candidate === "~" || candidate.startsWith("~/")) {
-    return resolve(homedir(), candidate.slice(2));
+    return resolve2(homedir(), candidate.slice(2));
   }
-  return isAbsolute(candidate) ? candidate : resolve(base, candidate);
+  return isAbsolute2(candidate) ? candidate : resolve2(base, candidate);
 }
 function labelOf(path, base) {
   const inside = relative(base, path);
-  return inside.startsWith("..") || isAbsolute(inside) ? path : inside;
+  return inside.startsWith("..") || isAbsolute2(inside) ? path : inside;
 }
 
 // src/messages.ts
@@ -4843,11 +5242,11 @@ function notice(systemMessage) {
 function tokenPattern2() {
   return /\[\[([a-z_]+):([0-9a-f]{12,64})\]\]/g;
 }
-function tokensIn(text) {
-  return [...text.matchAll(tokenPattern2())].map((match) => match[0]);
+function tokensIn(text2) {
+  return [...text2.matchAll(tokenPattern2())].map((match) => match[0]);
 }
 function hasTokens(texts) {
-  return texts.some((text) => tokenPattern2().test(text));
+  return texts.some((text2) => tokenPattern2().test(text2));
 }
 
 // src/handlers.ts
@@ -4895,7 +5294,7 @@ var Handlers = class {
     const context = contextOf(input.session_id);
     switch (input.hook_event_name) {
       case "SessionStart":
-        this.checkIn(keyed, hostVersion);
+        this.checkIn(keyed, hostVersion, input.cwd ?? null);
         return sessionContext(SESSION_GUIDE, null);
       case "UserPromptSubmit":
         return this.prompt(keyed, guard, session, context, input);
@@ -5006,7 +5405,7 @@ var Handlers = class {
     if (lost !== void 0) {
       return denyTool(unknownToken(lost));
     }
-    if (WRITE_TOOLS.has(input.tool_name) && texts.some((text) => text.includes(REMOVED_MARKER))) {
+    if (WRITE_TOOLS.has(input.tool_name) && texts.some((text2) => text2.includes(REMOVED_MARKER))) {
       return denyTool(REMOVED_MARKER_WRITE);
     }
     if (isValidated(input.tool_name)) {
@@ -5072,12 +5471,12 @@ var Handlers = class {
     const problems = [];
     const unrecorded = [];
     for (const call of input.tool_calls) {
-      const record = session.takeRecord(call.tool_use_id);
-      if (record === void 0) {
+      const record2 = session.takeRecord(call.tool_use_id);
+      if (record2 === void 0) {
         unrecorded.push(call);
-      } else if (record.status === "unchecked") {
-        problems.push(couldNotCheck(call.tool_name, record.reason));
-      } else if (!rewriteLanded(record, stringsOf(call.tool_response))) {
+      } else if (record2.status === "unchecked") {
+        problems.push(couldNotCheck(call.tool_name, record2.reason));
+      } else if (!rewriteLanded(record2, stringsOf(call.tool_response))) {
         problems.push(rewriteDropped(call.tool_name));
       }
     }
@@ -5171,12 +5570,12 @@ function attackNote(tool, outcome) {
   const carriedData = outcome.replaced.some(({ type }) => type !== null);
   return carriedData ? null : flaggedNote(tool, attack);
 }
-function rewriteLanded(record, texts) {
-  if (record.status !== "cleared" || record.replaced.length === 0) {
+function rewriteLanded(record2, texts) {
+  if (record2.status !== "cleared" || record2.replaced.length === 0) {
     return true;
   }
-  const visible = (needle) => needle.length > 0 && texts.some((text) => text.includes(needle));
-  return record.replaced.some(({ replacement }) => visible(replacement)) || !record.replaced.some(({ original }) => visible(original));
+  const visible = (needle) => needle.length > 0 && texts.some((text2) => text2.includes(needle));
+  return record2.replaced.some(({ replacement }) => visible(replacement)) || !record2.replaced.some(({ original }) => visible(original));
 }
 function misconfigured(event) {
   switch (event) {
@@ -5194,7 +5593,7 @@ function misconfigured(event) {
 }
 
 // src/pool.ts
-import { createHash as createHash2 } from "crypto";
+import { createHash as createHash3 } from "crypto";
 var GuardPool = class {
   /**
    * `sourceFor` names the plugin on a guard's events. A guard holds its session's
@@ -5228,7 +5627,7 @@ var GuardPool = class {
   }
 };
 function keyOf(config) {
-  return createHash2("sha256").update(
+  return createHash3("sha256").update(
     JSON.stringify([config.apiKey, config.endpoint, config.onUnavailable])
   ).digest("hex");
 }
@@ -5259,13 +5658,13 @@ var SessionState = class {
   }
   /** Take a tool's record, leaving none behind. */
   takeRecord(toolUseId) {
-    const record = this.records.get(toolUseId);
+    const record2 = this.records.get(toolUseId);
     this.records.delete(toolUseId);
-    return record;
+    return record2;
   }
   pruneRecords(now) {
-    for (const [id, record] of this.records) {
-      if (now - record.createdAt > RECORD_TTL_MS) {
+    for (const [id, record2] of this.records) {
+      if (now - record2.createdAt > RECORD_TTL_MS) {
         this.records.delete(id);
       }
     }
@@ -5375,14 +5774,16 @@ async function startService(options) {
   const handlers = new Handlers(
     guards,
     new Sessions(),
-    dataDir === void 0 ? void 0 : (config, hostVersion) => sendCheckIn(
+    dataDir === void 0 ? void 0 : (config, hostVersion, cwd) => sendCheckIn(
       {
         fetch: transport,
         installId: () => installId ??= installIdIn(dataDir),
+        surroundings: (at) => readSurroundings({ home: homedir3(), cwd: at, env: process.env, platform: process.platform }),
         onError: log
       },
       config,
-      hostVersion
+      hostVersion,
+      cwd
     )
   );
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
@@ -5420,7 +5821,7 @@ async function startService(options) {
   const close = () => {
     closing ??= (async () => {
       clearTimeout(idleTimer);
-      await new Promise((resolve2) => server.close(() => resolve2()));
+      await new Promise((resolve3) => server.close(() => resolve3()));
       await guards.closeAll();
       removeStale(options.socket);
     })();
@@ -5435,11 +5836,11 @@ async function startService(options) {
   }
   const previousUmask = process.umask(OWNER_ONLY_UMASK);
   try {
-    await new Promise((resolve2, reject) => {
+    await new Promise((resolve3, reject) => {
       server.once("error", reject);
       server.listen(options.socket, () => {
         server.off("error", reject);
-        resolve2();
+        resolve3();
       });
     });
   } finally {
@@ -5463,7 +5864,7 @@ function parseRequest(body) {
   return input === null ? null : { config: raw.config, input, hostVersion };
 }
 function readBody(req) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const chunks = [];
     let size = 0;
     req.on("data", (chunk) => {
@@ -5475,24 +5876,24 @@ function readBody(req) {
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve2(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => resolve3(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
 function isLive(socket) {
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     const probe = request(
       { socketPath: socket, path: HEALTH_PATH, method: "GET", timeout: PROBE_TIMEOUT_MS },
       (res) => {
         res.resume();
-        resolve2(res.statusCode === 200);
+        resolve3(res.statusCode === 200);
       }
     );
     probe.on("timeout", () => {
       probe.destroy();
-      resolve2(false);
+      resolve3(false);
     });
-    probe.on("error", () => resolve2(false));
+    probe.on("error", () => resolve3(false));
     probe.end();
   });
 }
