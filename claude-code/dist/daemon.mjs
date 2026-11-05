@@ -10,7 +10,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.6";
+var PLUGIN_VERSION = "0.1.7";
 
 // src/checkin.ts
 var INTEGRATION = "claude-code";
@@ -5346,11 +5346,15 @@ var Handlers = class {
     const guard = this.guards.get(config, hostVersion);
     const known = knownTo(request2.cwd ?? void 0);
     session.addLiterals(tokensIn(request2.text));
-    const outcome = await guard.protectTexts([request2.text], contextOf(request2.session_id), {
+    const check = () => guard.protectTexts([request2.text], contextOf(request2.session_id), {
       onMatch: TYPED_PROMPT_ON_MATCH,
       keep: known,
       semanticPass: TYPED_PROMPT_SEMANTIC_PASS
     });
+    let outcome = await check();
+    if (outcome.unavailable !== null) {
+      outcome = await check();
+    }
     if (outcome.unavailable !== null) {
       return { status: "defer", reason: outcome.unavailable };
     }

@@ -493,6 +493,25 @@ describe("cloakPrompt, for the prompt mod", () => {
     expect(model.status === "cloaked" ? model.message : "").not.toContain("flagged");
   });
 
+  it("asks again when the detector does not answer once, and defers when it never does", async () => {
+    await start();
+    const answer = plane.answer.bind(plane);
+    plane.mode = "cloak_down";
+    plane.answer = (path, body) => {
+      const reply = answer(path, body);
+      if (path === "/v1/scan") plane.mode = "answer";
+      return reply;
+    };
+
+    const recovered = await handlers.cloakPrompt({ session_id: SESSION, cwd: null, text: `mail ${EMAIL}` });
+    expect(recovered.status).toBe("cloaked");
+
+    plane.answer = answer;
+    plane.mode = "cloak_down";
+    const down = await handlers.cloakPrompt({ session_id: SESSION, cwd: null, text: `mail ${EMAIL} again` });
+    expect(down.status).toBe("defer");
+  });
+
   it("defers when the prompt policy is warn", async () => {
     const warn: HookConfig = { ...CONFIG, promptPersonalData: "warn" };
     await start(warn);

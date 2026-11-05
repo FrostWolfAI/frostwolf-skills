@@ -187,11 +187,18 @@ export class Handlers {
     const guard = this.guards.get(config, hostVersion);
     const known = knownTo(request.cwd ?? undefined);
     session.addLiterals(tokensIn(request.text));
-    const outcome = await guard.protectTexts([request.text], contextOf(request.session_id), {
-      onMatch: TYPED_PROMPT_ON_MATCH,
-      keep: known,
-      semanticPass: TYPED_PROMPT_SEMANTIC_PASS,
-    });
+    const check = () =>
+      guard.protectTexts([request.text], contextOf(request.session_id), {
+        onMatch: TYPED_PROMPT_ON_MATCH,
+        keep: known,
+        semanticPass: TYPED_PROMPT_SEMANTIC_PASS,
+      });
+    // A detector that timed out once usually answers the next request, and a
+    // deferred prompt is one the hook refuses, so it is asked a second time.
+    let outcome = await check();
+    if (outcome.unavailable !== null) {
+      outcome = await check();
+    }
     if (outcome.unavailable !== null) {
       return { status: "defer", reason: outcome.unavailable };
     }
