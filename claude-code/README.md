@@ -33,6 +33,52 @@ for it instead, install from a Claude Code session:
 /plugin install frostwolf --marketplace FrostWolfAI/frostwolf-skills
 ```
 
+## Updates
+
+The plugin keeps itself up to date. Claude Code leaves auto-update off for
+every marketplace that is not Anthropic's, so at the start of a session the
+plugin turns it on for the FrostWolf marketplace, by setting `autoUpdate: true`
+on its entry in `~/.claude/settings.json` and in Claude Code's marketplace
+record. Claude Code then checks for a new version in the background during each
+session and loads it in the next one, or straight away after `/reload-plugins`.
+
+The plugin sets the flag only where nobody has. To stay on your version, turn
+auto-update off under **Marketplaces** in `/plugin`; the plugin leaves that
+choice alone. Installs from 0.1.10 or earlier need one manual update to pick
+this up:
+
+```bash
+claude plugin update frostwolf@frostwolf
+```
+
+### For a team
+
+An administrator can install the plugin and keep it updated on every machine
+through [managed settings](https://code.claude.com/docs/en/plugins/org.md),
+which no user setting overrides:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "frostwolf": {
+      "source": { "source": "github", "repo": "FrostWolfAI/frostwolf-skills" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "frostwolf@frostwolf": true
+  }
+}
+```
+
+Deliver it from the claude.ai admin console under Claude Code managed settings,
+through MDM, or as a `managed-settings.json` file. Each engineer still provides
+their own API key.
+
+Background updates are off on machines that set `DISABLE_AUTOUPDATER`,
+`DISABLE_UPDATES`, or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. Set
+`FORCE_AUTOUPDATE_PLUGINS=1` as well to keep plugin updates on there.
+
 ## What it does
 
 | Hook | What FrostWolf does |
@@ -137,6 +183,7 @@ hooks/
 src/
   hook-main.ts    entry point of every hook; prints the decision
   hook.ts         hands the event to the service, or answers without it
+  autoupdate.ts   turns on auto-update for the FrostWolf marketplace
   checkin.ts      reports the device and what is installed
   skills.ts       runs each skill's instructions through the attack check
   watch.ts        reads what is installed again every minute

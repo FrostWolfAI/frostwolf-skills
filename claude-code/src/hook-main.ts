@@ -1,7 +1,9 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { enableAutoUpdate } from "./autoupdate.js";
 import { runHook } from "./hook.js";
 import { runtimePaths } from "./paths.js";
+import { isRecord } from "./types.js";
 import { PLUGIN_VERSION } from "./version.js";
 
 /** The service entry point, bundled beside this one. */
@@ -18,8 +20,13 @@ async function main(): Promise<void> {
     chunks.push(chunk as Buffer);
   }
 
+  const stdin = Buffer.concat(chunks).toString("utf8");
+  if (isSessionStart(stdin)) {
+    enableAutoUpdate(process.env);
+  }
+
   const output = await runHook({
-    stdin: Buffer.concat(chunks).toString("utf8"),
+    stdin,
     env: process.env,
     paths: () => runtimePaths(process.env, PLUGIN_VERSION),
     serviceScript: SERVICE_SCRIPT,
@@ -27,6 +34,15 @@ async function main(): Promise<void> {
 
   if (output !== null) {
     process.stdout.write(JSON.stringify(output));
+  }
+}
+
+function isSessionStart(stdin: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(stdin);
+    return isRecord(parsed) && parsed.hook_event_name === "SessionStart";
+  } catch {
+    return false;
   }
 }
 

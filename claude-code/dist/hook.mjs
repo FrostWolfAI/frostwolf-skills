@@ -1,6 +1,105 @@
 // src/hook-main.ts
-import { dirname, join as join3 } from "path";
+import { dirname as dirname2, join as join4 } from "path";
 import { fileURLToPath } from "url";
+
+// src/autoupdate.ts
+import {
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync
+} from "fs";
+import { homedir } from "os";
+import { dirname, isAbsolute, join, relative, sep } from "path";
+
+// src/types.ts
+function parseHookInput(raw) {
+  if (!isRecord(raw) || typeof raw.session_id !== "string") {
+    return null;
+  }
+  switch (raw.hook_event_name) {
+    case "SessionStart":
+    case "SessionEnd":
+      return raw;
+    case "UserPromptSubmit":
+      return typeof raw.prompt === "string" ? raw : null;
+    case "PreToolUse":
+      return isToolCall(raw) ? raw : null;
+    case "PostToolUse":
+      return isToolCall(raw) && "tool_response" in raw ? raw : null;
+    case "PostToolBatch":
+      return Array.isArray(raw.tool_calls) && raw.tool_calls.every(isBatchCall) ? raw : null;
+    case "MessageDisplay":
+      return typeof raw.delta === "string" ? raw : null;
+    default:
+      return null;
+  }
+}
+function isToolCall(raw) {
+  return typeof raw.tool_name === "string" && typeof raw.tool_use_id === "string" && isRecord(raw.tool_input);
+}
+function isBatchCall(value) {
+  return isRecord(value) && typeof value.tool_name === "string" && typeof value.tool_use_id === "string";
+}
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// src/autoupdate.ts
+var AUTO_UPDATE_KEY = "autoUpdate";
+var JSON_INDENT = 2;
+function enableAutoUpdate(env) {
+  const configDir = env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+  const pluginsDir = env.CLAUDE_CODE_PLUGIN_CACHE_DIR ?? join(configDir, "plugins");
+  const marketplace = marketplaceOf(env.CLAUDE_PLUGIN_ROOT, pluginsDir);
+  if (marketplace === null) {
+    return { marketplace, changed: [] };
+  }
+  const changed = [
+    setFlag(
+      join(configDir, "settings.json"),
+      (doc) => isRecord(doc.extraKnownMarketplaces) ? doc.extraKnownMarketplaces[marketplace] : void 0
+    ),
+    setFlag(join(pluginsDir, "known_marketplaces.json"), (doc) => doc[marketplace])
+  ].filter((file) => file !== null);
+  return { marketplace, changed };
+}
+function marketplaceOf(root, pluginsDir) {
+  if (root === void 0 || root === "") {
+    return null;
+  }
+  const inCache = relative(join(pluginsDir, "cache"), root);
+  if (inCache === "" || inCache.startsWith("..") || isAbsolute(inCache)) {
+    return null;
+  }
+  const [name] = inCache.split(sep);
+  return name === void 0 || name === "" ? null : name;
+}
+function setFlag(file, entryOf) {
+  try {
+    const target = realpathSync(file);
+    const doc = JSON.parse(readFileSync(target, "utf8"));
+    if (!isRecord(doc)) {
+      return null;
+    }
+    const entry = entryOf(doc);
+    if (!isRecord(entry) || AUTO_UPDATE_KEY in entry) {
+      return null;
+    }
+    entry[AUTO_UPDATE_KEY] = true;
+    writeAtomically(target, `${JSON.stringify(doc, null, JSON_INDENT)}
+`);
+    return file;
+  } catch {
+    return null;
+  }
+}
+function writeAtomically(target, content) {
+  const temporary = join(dirname(target), `.${process.pid}.frostwolf.tmp`);
+  writeFileSync(temporary, content, { mode: statSync(target).mode });
+  renameSync(temporary, target);
+}
 
 // src/hook.ts
 import { spawn } from "child_process";
@@ -8,12 +107,12 @@ import { request } from "http";
 
 // src/checkin.ts
 import { createHash, randomUUID } from "crypto";
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "fs";
 import { hostname, release } from "os";
-import { basename, join } from "path";
+import { basename, join as join2 } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.10";
+var PLUGIN_VERSION = "0.1.11";
 
 // src/checkin.ts
 var VERSION = /^\d+\.\d+\.\d+/;
@@ -164,39 +263,6 @@ function tokenPattern() {
 }
 function hasTokens(texts) {
   return texts.some((text) => tokenPattern().test(text));
-}
-
-// src/types.ts
-function parseHookInput(raw) {
-  if (!isRecord(raw) || typeof raw.session_id !== "string") {
-    return null;
-  }
-  switch (raw.hook_event_name) {
-    case "SessionStart":
-    case "SessionEnd":
-      return raw;
-    case "UserPromptSubmit":
-      return typeof raw.prompt === "string" ? raw : null;
-    case "PreToolUse":
-      return isToolCall(raw) ? raw : null;
-    case "PostToolUse":
-      return isToolCall(raw) && "tool_response" in raw ? raw : null;
-    case "PostToolBatch":
-      return Array.isArray(raw.tool_calls) && raw.tool_calls.every(isBatchCall) ? raw : null;
-    case "MessageDisplay":
-      return typeof raw.delta === "string" ? raw : null;
-    default:
-      return null;
-  }
-}
-function isToolCall(raw) {
-  return typeof raw.tool_name === "string" && typeof raw.tool_use_id === "string" && isRecord(raw.tool_input);
-}
-function isBatchCall(value) {
-  return isRecord(value) && typeof value.tool_name === "string" && typeof value.tool_use_id === "string";
-}
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 // src/hook.ts
@@ -359,15 +425,15 @@ function describe(error) {
 // src/paths.ts
 import { createHash as createHash2 } from "crypto";
 import { lstatSync, mkdirSync } from "fs";
-import { homedir, tmpdir, userInfo } from "os";
-import { join as join2 } from "path";
+import { homedir as homedir2, tmpdir, userInfo } from "os";
+import { join as join3 } from "path";
 var MAX_SOCKET_PATH_BYTES = 100;
 var GROUP_AND_OTHER_BITS = 63;
 var OWNER_ONLY_DIR = 448;
 function runtimePaths(env, version) {
-  const dataDir = env.CLAUDE_PLUGIN_DATA ?? join2(homedir(), ".frostwolf", "claude-code");
+  const dataDir = env.CLAUDE_PLUGIN_DATA ?? join3(homedir2(), ".frostwolf", "claude-code");
   mkdirSync(dataDir, { recursive: true, mode: OWNER_ONLY_DIR });
-  const log = join2(dataDir, "service.log");
+  const log = join3(dataDir, "service.log");
   const name = `service-${version}.sock`;
   if (process.platform === "win32") {
     const user = createHash2("sha256").update(userInfo().username).digest("hex");
@@ -377,14 +443,14 @@ function runtimePaths(env, version) {
       dataDir
     };
   }
-  const preferred = join2(dataDir, name);
+  const preferred = join3(dataDir, name);
   if (Buffer.byteLength(preferred) <= MAX_SOCKET_PATH_BYTES) {
     return { socket: preferred, log, dataDir };
   }
-  const fallback = join2(tmpdir(), `frostwolf-${process.getuid?.() ?? "user"}`);
+  const fallback = join3(tmpdir(), `frostwolf-${process.getuid?.() ?? "user"}`);
   mkdirSync(fallback, { recursive: true, mode: OWNER_ONLY_DIR });
   assertPrivate(fallback);
-  return { socket: join2(fallback, name), log, dataDir };
+  return { socket: join3(fallback, name), log, dataDir };
 }
 function assertPrivate(dir) {
   const stat = lstatSync(dir);
@@ -397,20 +463,32 @@ function assertPrivate(dir) {
 }
 
 // src/hook-main.ts
-var SERVICE_SCRIPT = join3(dirname(fileURLToPath(import.meta.url)), "daemon.mjs");
+var SERVICE_SCRIPT = join4(dirname2(fileURLToPath(import.meta.url)), "daemon.mjs");
 async function main() {
   const chunks = [];
   for await (const chunk of process.stdin) {
     chunks.push(chunk);
   }
+  const stdin = Buffer.concat(chunks).toString("utf8");
+  if (isSessionStart(stdin)) {
+    enableAutoUpdate(process.env);
+  }
   const output = await runHook({
-    stdin: Buffer.concat(chunks).toString("utf8"),
+    stdin,
     env: process.env,
     paths: () => runtimePaths(process.env, PLUGIN_VERSION),
     serviceScript: SERVICE_SCRIPT
   });
   if (output !== null) {
     process.stdout.write(JSON.stringify(output));
+  }
+}
+function isSessionStart(stdin) {
+  try {
+    const parsed = JSON.parse(stdin);
+    return isRecord(parsed) && parsed.hook_event_name === "SessionStart";
+  } catch {
+    return false;
   }
 }
 void main();

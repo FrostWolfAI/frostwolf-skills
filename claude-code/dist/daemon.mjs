@@ -12,7 +12,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.10";
+var PLUGIN_VERSION = "0.1.11";
 
 // src/checkin.ts
 var INTEGRATION = "claude-code";
