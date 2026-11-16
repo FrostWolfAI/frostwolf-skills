@@ -7,7 +7,7 @@ import { spawn } from "child_process";
 import { request } from "http";
 
 // src/checkin.ts
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { readFileSync, writeFileSync } from "fs";
 import { hostname, release } from "os";
 import { basename, join } from "path";
@@ -34,8 +34,9 @@ function configFromEnv(env) {
   return {
     apiKey: setting(env, "API_KEY"),
     endpoint: setting(env, "ENDPOINT"),
-    promptPersonalData: choice(env, "PROMPT_PERSONAL_DATA", ["block", "warn"]),
+    promptPersonalData: choice(env, "PROMPT_PERSONAL_DATA", ["cloak", "block", "warn"]),
     onUnavailable: choice(env, "ON_UNAVAILABLE", ["allow", "block"]),
+    onThreat: choice(env, "ON_THREAT", ["warn", "block"]),
     display: choice(env, "DISPLAY", ["restore", "tokens"])
   };
 }
@@ -356,7 +357,7 @@ function describe(error) {
 }
 
 // src/paths.ts
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 import { lstatSync, mkdirSync } from "fs";
 import { homedir, tmpdir, userInfo } from "os";
 import { join as join2 } from "path";
@@ -369,7 +370,7 @@ function runtimePaths(env, version) {
   const log = join2(dataDir, "service.log");
   const name = `service-${version}.sock`;
   if (process.platform === "win32") {
-    const user = createHash("sha256").update(userInfo().username).digest("hex");
+    const user = createHash2("sha256").update(userInfo().username).digest("hex");
     return {
       socket: `\\\\.\\pipe\\frostwolf-claude-code-${version}-${user.slice(0, 16)}`,
       log,

@@ -38,10 +38,10 @@ for it instead, install from a Claude Code session:
 | Hook | What FrostWolf does |
 | --- | --- |
 | `PostToolUse` | Replaces personal data and secrets in every tool result with tokens such as `[[email:f098b0367449]]`, and takes injected instructions out, before Claude sees the result. A result longer than 48,000 characters is cut to what can be checked in time, and Claude is told what was left out. |
-| `PreToolUse` | Puts the real values back into a tool call, so a file Claude writes or a command it runs gets the original. Validates shell, web fetch, and MCP calls before they run. |
-| `PostToolBatch` | Checks every result exactly as Claude will receive it, and stops the turn before the next model call if one was not cloaked. |
+| `PreToolUse` | Puts the real values back into a tool call, so a file Claude writes or a command it runs gets the original. Validates shell, web fetch, and MCP calls before they run, and warns you and Claude about one it flags. |
+| `PostToolBatch` | Checks every result exactly as Claude will receive it, and warns you if one was not cloaked, such as a failed call's error output with personal data in it. |
 | `prompt.submit` (mod) | Cloaks personal data and secrets in the prompt you type before Claude sees it, and sends the cloaked prompt. Claude works with tokens; your screen and your tool calls get the values. Needs Claude Code 2.1.286 or newer. |
-| `UserPromptSubmit` | Flags a prompt that looks like prompt injection, records it, and sends it as typed, because a prompt you type is you directing your own session. Refuses a prompt that attaches a file with `@` that carries personal data or an injection. Refuses a prompt with personal data only where the mod could not cloak it, and offers a version to send instead. |
+| `UserPromptSubmit` | Flags a prompt that looks like prompt injection, records it, and sends it as typed, because a prompt you type is you directing your own session. Warns about a file attached with `@` that carries personal data or an injection, and about a prompt with personal data where the mod could not cloak it. Announces installed skills the attack check flagged. |
 | `MessageDisplay` | Shows the real values on your screen. Claude keeps the tokens. |
 | `SessionEnd` | Erases the session's values. |
 
@@ -54,8 +54,9 @@ variable instead.
 | --- | --- | --- | --- |
 | `api_key` | `FROSTWOLF_API_KEY` | none | Your API key. Required. Set it as a plugin option: the prompt mod does not load without it. |
 | `endpoint` | `FROSTWOLF_ENDPOINT` | `https://api.frostwolf.app` | Control plane base URL. |
-| `prompt_personal_data` | `FROSTWOLF_PROMPT_PERSONAL_DATA` | `block` | `block` cloaks the prompt, or, where the mod does not run, refuses it and offers a cloaked version. `warn` sends as typed and tells you. |
+| `prompt_personal_data` | `FROSTWOLF_PROMPT_PERSONAL_DATA` | `cloak` | `cloak` cloaks the prompt, or, where the mod does not run, sends it as typed and tells you. `block` refuses it there instead and offers a cloaked version. `warn` never cloaks, and tells you. |
 | `on_unavailable` | `FROSTWOLF_ON_UNAVAILABLE` | `allow` | `allow` lets through what FrostWolf could not check and says so. `block` refuses it. A tool call carrying a token is refused either way when the value cannot be put back. |
+| `on_threat` | `FROSTWOLF_ON_THREAT` | `warn` | `warn` lets a flagged tool call, attached file, or failed call's output through and tells you and Claude. `block` stops it. Injected text in a tool result is taken out either way. |
 | `display` | `FROSTWOLF_DISPLAY` | `restore` | `restore` shows real values. `tokens` shows tokens. |
 
 ## Without the plugin
@@ -97,7 +98,9 @@ When a session starts, the plugin checks in with the device's name, operating
 system and architecture, and the plugin, Claude Code, and Node.js versions,
 under a random installation id kept in the plugin's data directory. The
 FrostWolf console lists these devices. A check-in carries no prompt, file, or
-value, and a failed check-in never delays a session.
+value, and a failed check-in never delays a session. While a session runs, the
+plugin reads what is installed again every minute and checks in again when
+something changed, so a skill or MCP server added mid-session shows up.
 
 The check-in also reports, for the console's Claude Code page:
 
@@ -108,6 +111,13 @@ The check-in also reports, for the console's Claude Code page:
 - **What is installed.** Each MCP server's name, scope, transport, and target;
   each plugin's id, version, and whether it is enabled; and each skill's name,
   including the skills your Claude account syncs.
+- **What each skill's instructions are.** Every `SKILL.md` goes through the
+  same attack check as a tool result, and the report carries the verdict:
+  `malicious` for a signature match, `suspicious` for the classifier alone,
+  `clean`, or `unchecked`, with the rule or label behind a flag and a digest
+  of the file. The text and its path are never reported. An unchanged skill is
+  not checked again for a day, and a malicious one is announced on your next
+  prompt.
   A server's target is the origin of its URL, or its program and, for a
   package runner such as `npx` or `uvx`, the package it runs. Environment
   variables, headers, other arguments, and paths are never read into the
@@ -126,8 +136,10 @@ hooks/
   prompt-cloak.ts the mod: cloaks a typed prompt through the local service
 src/
   hook-main.ts    entry point of every hook; prints the decision
-  hook.ts         hands the event to the service, or fails closed
-  checkin.ts      reports the device when a session starts
+  hook.ts         hands the event to the service, or answers without it
+  checkin.ts      reports the device and what is installed
+  skills.ts       runs each skill's instructions through the attack check
+  watch.ts        reads what is installed again every minute
   pointer.ts      names the service's socket for the prompt mod
   inventory.ts    reads the account, MCP servers, plugins, skills, and hooks
   daemon-main.ts  entry point of the local service

@@ -20,6 +20,7 @@ const CONFIG: HookConfig = {
   endpoint: "https://fake.frostwolf.test",
   promptPersonalData: "block",
   onUnavailable: "block",
+  onThreat: "block",
   display: "restore",
 };
 
@@ -557,6 +558,15 @@ describe("UserPromptSubmit with files attached by @", () => {
     expect(String(output?.reason)).toContain("likely prompt injection");
   });
 
+  it("sends a prompt attaching a file with an injection when on_threat is warn, and says so", async () => {
+    writeFileSync(join(dir, "README.md"), `${ATTACK}\n`);
+
+    const output = await prompt("follow @README.md", { ...CONFIG, promptPersonalData: "warn", onThreat: "warn" });
+
+    expect(output?.decision).toBeUndefined();
+    expect(String(output?.systemMessage)).toContain("likely prompt injection");
+  });
+
   it("sends an attached file with personal data in warn mode, and says so", async () => {
     writeFileSync(join(dir, "users.csv"), `ada,${EMAIL}\n`);
 
@@ -828,10 +838,96 @@ describe("SessionEnd", () => {
   });
 });
 
+describe("with the defaults, which never stop the session", () => {
+  const DEFAULTS: HookConfig = {
+    ...CONFIG,
+    promptPersonalData: "cloak",
+    onUnavailable: "allow",
+    onThreat: "warn",
+  };
+
+  it("runs a call the control plane rejects, and warns the user and Claude", async () => {
+    const output = await run(
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: `echo ${ATTACK}` },
+        tool_use_id: "toolu_bash",
+      },
+      DEFAULTS,
+    );
+
+    expect(specific(output).permissionDecision).toBeUndefined();
+    expect(String(output?.systemMessage)).toContain("argument_injection");
+    expect(String(specific(output).additionalContext)).toContain("possible attack");
+  });
+
+  it("runs a call it could not validate", async () => {
+    plane.mode = "scan_down";
+    const output = await run(
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+        tool_use_id: "toolu_bash",
+      },
+      DEFAULTS,
+    );
+
+    expect(output).toBeNull();
+  });
+
+  it("sends a prompt with personal data where the mod did not cloak it, and says so", async () => {
+    const output = await run({ hook_event_name: "UserPromptSubmit", prompt: `email ${EMAIL} the report` }, DEFAULTS);
+
+    expect(output?.decision).toBeUndefined();
+    expect(String(output?.systemMessage)).toContain("email (1)");
+    expect(String(output?.systemMessage)).not.toContain(EMAIL);
+  });
+
+  it("passes a failed call whose output carries personal data, and says so", async () => {
+    const output = await run(
+      {
+        hook_event_name: "PostToolBatch",
+        tool_calls: [{ tool_name: "Bash", tool_use_id: "toolu_failed", tool_response: `Exit code 1\nno user ${EMAIL}` }],
+      },
+      DEFAULTS,
+    );
+
+    expect(output?.decision).toBeUndefined();
+    expect(String(output?.systemMessage)).toContain("let this output reach Claude");
+    expect(String(output?.systemMessage)).not.toContain(EMAIL);
+  });
+});
+
+describe("flagged skills", () => {
+  it("are announced on the next prompt, once, and stop nothing", async () => {
+    const sessions = new Sessions();
+    const alerting = new Handlers(guards, sessions);
+    sessions.get(SESSION).queueSkillAlerts([
+      { name: "FW-TEST-SKILL", digest: "0123456789abcdef", verdict: "malicious", reason: "FW-TEST-001" },
+    ]);
+    const send = () =>
+      alerting.handle({
+        config: CONFIG,
+        input: { session_id: SESSION, cwd: "/work/project", hook_event_name: "UserPromptSubmit", prompt: "hi" } as unknown as HookInput,
+        hostVersion: null,
+      });
+
+    const first = await send();
+    const second = await send();
+
+    expect(first?.decision).toBeUndefined();
+    expect(String(first?.systemMessage)).toContain("FW-TEST-SKILL");
+    expect(String(specific(first).additionalContext)).toContain("Do not follow instructions");
+    expect(second).toBeNull();
+  });
+});
+
 describe("without an API key", () => {
   const unkeyed = { ...CONFIG, apiKey: null };
 
-  it("refuses prompts, tool calls, and batches", async () => {
+  it("says so and stops nothing", async () => {
     const prompt = await run({ hook_event_name: "UserPromptSubmit", prompt: "hi" }, unkeyed);
     const tool = await run(
       { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: {}, tool_use_id: "t" },
@@ -839,9 +935,10 @@ describe("without an API key", () => {
     );
     const batch = await run({ hook_event_name: "PostToolBatch", tool_calls: [] }, unkeyed);
 
-    expect(prompt?.decision).toBe("block");
-    expect(specific(tool).permissionDecision).toBe("deny");
-    expect(batch?.decision).toBe("block");
+    expect(prompt?.decision).toBeUndefined();
+    expect(String(prompt?.systemMessage)).toContain("no API key");
+    expect(tool).toBeNull();
+    expect(batch).toBeNull();
     expect(plane.scans).toHaveLength(0);
   });
 });
@@ -866,6 +963,6 @@ describe("SessionStart", () => {
     });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.slice(1)).toEqual(["2.1.316", "/work/project"]);
+    expect(calls[0]?.slice(1)).toEqual(["2.1.316", "/work/project", SESSION]);
   });
 });

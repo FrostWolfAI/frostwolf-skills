@@ -3,6 +3,7 @@ import { RestoreDeniedError, type CloakContext } from "@frostwolfai/sdk";
 import type { HookConfig } from "./config.js";
 import { capTexts, MAX_RESULT_CHARS, totalLength } from "./chunks.js";
 import { entityCounts, type AgentGuard, type TextsOutcome } from "./guard.js";
+import type { FlaggedSkill } from "./skills.js";
 import { stringsOf, TooDeepError, withStrings } from "./leaves.js";
 import { attachedFiles, withoutMentions, type Attached } from "./mentions.js";
 import * as say from "./messages.js";
@@ -116,6 +117,7 @@ export type CheckIn = (
   config: KeyedConfig,
   hostVersion: string | null,
   cwd: string | null,
+  sessionId: string,
 ) => void;
 
 export class Handlers {
@@ -147,12 +149,15 @@ export class Handlers {
 
     switch (input.hook_event_name) {
       case "SessionStart":
-        this.checkIn(keyed, hostVersion, input.cwd ?? null);
+        this.checkIn(keyed, hostVersion, input.cwd ?? null, input.session_id);
         return sessionContext(say.SESSION_GUIDE, null);
       case "UserPromptSubmit":
-        return this.prompt(keyed, guard, session, context, input);
+        return withSkillAlerts(
+          await this.prompt(keyed, guard, session, context, input),
+          session.takeSkillAlerts(),
+        );
       case "PreToolUse": {
-        const output = await this.preTool(guard, session, context, input);
+        const output = await this.preTool(keyed, guard, session, context, input);
         // A refused call never runs, and Claude Code hands the batch check the
         // refusal as the call's error output. That text is FrostWolf's own, so
         // the call is recorded and the batch check leaves it alone.
@@ -284,7 +289,7 @@ export class Handlers {
     if (data.length === 0 && refusals.length === 0) {
       return attack === null ? null : notice(say.promptFlagged(attack));
     }
-    if (refusals.length === 0 && config.promptPersonalData === "warn") {
+    if (refusals.length === 0 && config.promptPersonalData !== "block") {
       const flagged = attack === null ? [] : [say.promptFlagged(attack)];
       return notice([say.promptWarned(data), ...flagged].join("\n"));
     }
@@ -329,7 +334,10 @@ export class Handlers {
     });
 
     if (outcome.attack !== null) {
-      return { kind: "refuse", message: say.attachedAttack(file.label, outcome.attack) };
+      return {
+        kind: config.onThreat === "block" ? "refuse" : "data",
+        message: say.attachedAttack(file.label, outcome.attack),
+      };
     }
     if (outcome.unavailable !== null && unchecked) {
       return {
@@ -352,6 +360,7 @@ export class Handlers {
    * rather than reaching a file or a shell as literal text.
    */
   private async preTool(
+    config: KeyedConfig,
     guard: AgentGuard,
     session: SessionState,
     context: CloakContext,
@@ -387,14 +396,45 @@ export class Handlers {
       return denyTool(say.REMOVED_MARKER_WRITE);
     }
 
-    if (isValidated(input.tool_name)) {
-      const verdict = await guard.validateCall(input.tool_name, input.tool_input);
-      if (!verdict.allowed) {
+    const verdict = isValidated(input.tool_name)
+      ? await this.validated(config, guard, input)
+      : null;
+    if (verdict !== null && !verdict.allowed) {
+      if (config.onThreat === "block") {
         return denyTool(say.rejectedCall(verdict));
       }
+      return {
+        systemMessage: say.rejectedCallRan(verdict),
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          additionalContext: say.REJECTED_CALL_CONTEXT,
+          ...(restored.restored > 0 ? { updatedInput: restored.value } : {}),
+        },
+      };
     }
 
     return restored.restored > 0 ? rewriteToolInput(restored.value) : null;
+  }
+
+  /**
+   * Validate a call, or null when validation could not run.
+   *
+   * A control plane that cannot answer, or refuses the key, leaves the call
+   * unvalidated rather than stopped, unless `on_unavailable` says to block.
+   */
+  private async validated(
+    config: KeyedConfig,
+    guard: AgentGuard,
+    input: PreToolInput,
+  ) {
+    try {
+      return await guard.validateCall(input.tool_name, input.tool_input);
+    } catch (error) {
+      if (config.onUnavailable === "block") {
+        throw error;
+      }
+      return null;
+    }
   }
 
   /**
@@ -481,7 +521,10 @@ export class Handlers {
     context: CloakContext,
     input: BatchInput,
   ): Promise<HookOutput | null> {
+    /** Problems that stop the batch whatever `on_threat` says. */
     const problems: string[] = [];
+    /** Problems that stop it only when `on_threat` is `block`. */
+    const threats: string[] = [];
     const unrecorded: BatchCall[] = [];
 
     for (const call of input.tool_calls) {
@@ -493,7 +536,7 @@ export class Handlers {
       } else if (record.status === "unchecked") {
         problems.push(say.couldNotCheck(call.tool_name, record.reason));
       } else if (!rewriteLanded(record, stringsOf(call.tool_response))) {
-        problems.push(say.rewriteDropped(call.tool_name));
+        threats.push(say.rewriteDropped(call.tool_name));
       }
     }
 
@@ -503,9 +546,20 @@ export class Handlers {
         this.checkUnrecorded(config, guard, context, known, call),
       ),
     );
-    problems.push(...found.filter((problem) => problem !== null));
+    for (const finding of found) {
+      if (finding !== null) {
+        (finding.unchecked ? problems : threats).push(finding.message);
+      }
+    }
 
-    return problems.length === 0 ? null : stopBatch(say.batchStopped(problems));
+    if (config.onThreat === "block") {
+      problems.push(...threats);
+      threats.length = 0;
+    }
+    if (problems.length > 0) {
+      return stopBatch(say.batchStopped([...problems, ...threats]));
+    }
+    return threats.length === 0 ? null : notice(say.batchWarned(threats));
   }
 
   private async checkUnrecorded(
@@ -514,20 +568,24 @@ export class Handlers {
     context: CloakContext,
     known: (original: string) => boolean,
     call: BatchCall,
-  ): Promise<string | null> {
+  ): Promise<{ readonly message: string; readonly unchecked: boolean } | null> {
+    const unchecked = (message: string) => ({ message, unchecked: true });
+    const threat = (message: string) => ({ message, unchecked: false });
     let texts: string[];
     try {
       texts = stringsOf(call.tool_response);
     } catch (error) {
       if (error instanceof TooDeepError) {
-        return say.couldNotCheck(call.tool_name, "too_deep");
+        return config.onUnavailable === "block"
+          ? unchecked(say.couldNotCheck(call.tool_name, "too_deep"))
+          : null;
       }
       throw error;
     }
 
     if (totalLength(texts) > MAX_RESULT_CHARS) {
       return config.onUnavailable === "block"
-        ? say.couldNotCheck(call.tool_name, "too_large")
+        ? unchecked(say.couldNotCheck(call.tool_name, "too_large"))
         : null;
     }
 
@@ -539,15 +597,15 @@ export class Handlers {
 
     if (outcome.unavailable !== null) {
       return config.onUnavailable === "block"
-        ? say.couldNotCheck(call.tool_name, outcome.unavailable)
+        ? unchecked(say.couldNotCheck(call.tool_name, outcome.unavailable))
         : null;
     }
     const entities = entityCounts(outcome.replaced, known);
     if (entities.size > 0) {
-      return say.failedCallData(call.tool_name, entities);
+      return threat(say.failedCallData(call.tool_name, entities));
     }
     if (outcome.attack !== null) {
-      return say.failedCallAttack(call.tool_name, outcome.attack);
+      return threat(say.failedCallAttack(call.tool_name, outcome.attack));
     }
     return null;
   }
@@ -588,6 +646,37 @@ export class Handlers {
   private deadlineOf(event: HookEvent): number {
     return this.now() + DEADLINES_MS[event] - RESPONSE_MARGIN_MS;
   }
+}
+
+/**
+ * Add the skills the inventory check flagged to a prompt's answer: a warning
+ * for the user, and for Claude, when the prompt goes ahead, a note not to
+ * follow them. Nothing is stopped.
+ */
+function withSkillAlerts(
+  output: HookOutput | null,
+  skills: readonly FlaggedSkill[],
+): HookOutput | null {
+  if (skills.length === 0) {
+    return output;
+  }
+  const warning = say.skillsFlagged(skills);
+  const existing = typeof output?.systemMessage === "string" ? output.systemMessage : null;
+  const merged: HookOutput = {
+    ...output,
+    systemMessage: existing === null ? warning : `${warning}\n\n${existing}`,
+  };
+  if (output?.decision === "block") {
+    return merged;
+  }
+  return {
+    ...merged,
+    hookSpecificOutput: {
+      ...(typeof output?.hookSpecificOutput === "object" ? output.hookSpecificOutput : {}),
+      hookEventName: "UserPromptSubmit",
+      additionalContext: say.skillsFlaggedContext(skills),
+    },
+  };
 }
 
 /** The Cloak context of a session. Subagents share their parent's. */
@@ -689,17 +778,16 @@ function rewriteLanded(record: ToolRecord, texts: readonly string[]): boolean {
   );
 }
 
-/** What each event does without an API key. Every gate refuses. */
+/**
+ * What each event does without an API key: say so, and stop nothing. Without a
+ * key nothing was ever cloaked, so no call carries a token to restore.
+ */
 function misconfigured(event: HookEvent): HookOutput | null {
   switch (event) {
     case "SessionStart":
       return notice(say.NO_API_KEY);
     case "UserPromptSubmit":
-      return blockPrompt(say.NO_API_KEY);
-    case "PreToolUse":
-      return denyTool(say.NO_API_KEY);
-    case "PostToolBatch":
-      return stopBatch(say.NO_API_KEY);
+      return notice(say.NO_API_KEY_UNCHECKED);
     default:
       return null;
   }

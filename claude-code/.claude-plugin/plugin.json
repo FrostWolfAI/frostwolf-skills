@@ -34,12 +34,13 @@
     "prompt_personal_data": {
       "type": "string",
       "title": "Personal data in prompts",
-      "description": "block refuses a prompt that carries personal data and offers a cloaked version to send instead. warn sends it as typed and tells you.",
+      "description": "cloak replaces personal data in a typed prompt before Claude sees it, and sends the prompt as typed with a warning where it cannot. block refuses the prompt where it cannot cloak it. warn sends it as typed and tells you.",
       "options": [
+        "cloak",
         "block",
         "warn"
       ],
-      "default": "block"
+      "default": "cloak"
     },
     "on_unavailable": {
       "type": "string",
@@ -50,6 +51,16 @@
         "block"
       ],
       "default": "allow"
+    },
+    "on_threat": {
+      "type": "string",
+      "title": "When FrostWolf finds an attack",
+      "description": "warn lets a flagged tool call, attached file, or failed call's output through and tells you and Claude. block stops it. Injected text in tool output is taken out either way.",
+      "options": [
+        "warn",
+        "block"
+      ],
+      "default": "warn"
     },
     "display": {
       "type": "string",

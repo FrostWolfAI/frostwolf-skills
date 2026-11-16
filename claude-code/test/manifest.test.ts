@@ -13,8 +13,13 @@ interface HookEntry {
 
 const MS_PER_SECOND = 1_000;
 
-/** Events that gate something, and so must refuse when the hook fails. */
-const GATES: readonly HookEvent[] = ["UserPromptSubmit", "PreToolUse", "PostToolBatch"];
+/**
+ * A tool call is the one gate that refuses when its hook fails: run without the
+ * hook, a token in it would reach a file or a command as the token itself.
+ * Every other event goes on, so a failing hook never stops the session.
+ */
+const GATES: readonly HookEvent[] = ["PreToolUse"];
+const PASSES: readonly HookEvent[] = ["UserPromptSubmit", "PostToolBatch"];
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
 const plugin = JSON.parse(readFileSync(".claude-plugin/plugin.json", "utf8")) as { version: string };
@@ -50,6 +55,10 @@ describe("hooks.json", () => {
 
   it.each(GATES)("blocks when the %s hook itself fails", (event) => {
     expect(entryFor(event).onFailure).toBe("block");
+  });
+
+  it.each(PASSES)("goes on when the %s hook itself fails", (event) => {
+    expect(entryFor(event).onFailure).toBeUndefined();
   });
 
   it("runs the bundled hook in exec form", () => {

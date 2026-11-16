@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { hostname, release } from "node:os";
 import { basename, join } from "node:path";
 import type { FetchLike } from "@frostwolfai/sdk";
 import type { Surroundings } from "./inventory.js";
+import type { CheckedSurroundings, FlaggedSkill } from "./skills.js";
 import type { KeyedConfig } from "./pool.js";
 import { PLUGIN_VERSION } from "./version.js";
 
@@ -126,28 +127,56 @@ export interface CheckInDeps {
   readonly installId: () => string;
   /** What is installed around the session. Its failure costs the inventory, not the check-in. */
   readonly surroundings: (cwd: string | null) => Surroundings;
+  /** Adds each skill's verdict. Without it, skills are reported without one. */
+  readonly checkSkills?: (surroundings: Surroundings) => Promise<CheckedSurroundings>;
   readonly onError: (error: Error) => void;
 }
 
 /**
- * Tell the control plane a session started on this device.
- *
- * Fire and forget: the session never waits on it, and a failure goes to the
- * log and nowhere else.
+ * What the last check-in for a key and directory sent, as a digest, so a
+ * periodic check-in posts only when something changed. Held in memory only.
  */
-export function sendCheckIn(
+export type SentDigests = Map<string, string>;
+
+/**
+ * Tell the control plane what this device runs, and check its skills.
+ *
+ * Never rejects, and the session never waits on it: a failure goes to the log.
+ * With `sent`, what is posted is remembered, and unless `force` is set a report
+ * identical to the last one sent for the same key and directory is not posted
+ * again. Resolves to the skills the check flagged.
+ */
+export async function checkIn(
   deps: CheckInDeps,
   config: KeyedConfig,
   hostVersion: string | null,
   cwd: string | null,
-): void {
-  const run = async (): Promise<void> => {
+  sent: SentDigests | null = null,
+  force = true,
+): Promise<readonly FlaggedSkill[]> {
+  let flagged: readonly FlaggedSkill[] = [];
+  try {
     let surroundings: Surroundings | null = null;
     try {
       surroundings = deps.surroundings(cwd);
+      if (deps.checkSkills !== undefined) {
+        const checked = await deps.checkSkills(surroundings);
+        surroundings = checked.surroundings;
+        flagged = checked.flagged;
+      }
     } catch (error) {
       deps.onError(error instanceof Error ? error : new Error(String(error)));
     }
+
+    const body = JSON.stringify(checkInBody(deps.installId(), hostVersion, surroundings));
+    const key = createHash("sha256")
+      .update(JSON.stringify([config.apiKey, config.endpoint, cwd]))
+      .digest("hex");
+    const digest = createHash("sha256").update(body).digest("hex");
+    if (!force && sent?.get(key) === digest) {
+      return flagged;
+    }
+
     const endpoint = (config.endpoint ?? DEFAULT_ENDPOINT).replace(/\/+$/, "");
     const response = await deps.fetch(`${endpoint}${CHECKIN_PATH}`, {
       method: "POST",
@@ -156,15 +185,16 @@ export function sendCheckIn(
         "content-type": "application/json",
         "user-agent": userAgentOf(hostVersion),
       },
-      body: JSON.stringify(checkInBody(deps.installId(), hostVersion, surroundings)),
+      body,
       signal: AbortSignal.timeout(CHECKIN_TIMEOUT_MS),
     });
     if (!response.ok) {
       throw new Error(`The check-in was refused with status ${response.status}.`);
     }
-  };
-
-  run().catch((error: unknown) => {
+    sent?.set(key, digest);
+    return flagged;
+  } catch (error) {
     deps.onError(error instanceof Error ? error : new Error(String(error)));
-  });
+    return flagged;
+  }
 }

@@ -1,14 +1,18 @@
 import { appendFileSync, unlinkSync } from "node:fs";
 import { createServer, request, type IncomingMessage, type Server } from "node:http";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import type { FetchLike } from "@frostwolfai/sdk";
-import { INTEGRATION, installIdIn, sendCheckIn } from "./checkin.js";
+import { INTEGRATION, installIdIn } from "./checkin.js";
 import { readSurroundings } from "./inventory.js";
 import { Handlers, type PromptCloakRequest } from "./handlers.js";
-import { GuardPool } from "./pool.js";
+import { GuardPool, type KeyedConfig } from "./pool.js";
 import { HEALTH_PATH, HOOK_PATH, PROMPT_PATH } from "./protocol.js";
 import { removePointer, writePointer } from "./pointer.js";
 import { Sessions } from "./session.js";
+import { SkillScanner } from "./skills.js";
+import { InventoryWatch } from "./watch.js";
 import {
   isRecord,
   parseHookInput,
@@ -36,12 +40,25 @@ const PROBE_TIMEOUT_MS = 500;
 /** Owner-only file mode bits, applied to the socket through the umask. */
 const OWNER_ONLY_UMASK = 0o077;
 
+/** File in the data directory, one per key, that holds skill verdicts by digest. */
+const SKILL_VERDICTS_FILE = "skill-verdicts";
+
+/** Hex characters of the key digest a verdict file is named by. */
+const KEY_DIGEST_CHARS = 16;
+
+/** Names a key without writing it to disk. */
+function digestOf(key: string): string {
+  return createHash("sha256").update(key).digest("hex").slice(0, KEY_DIGEST_CHARS);
+}
+
 export interface ServiceOptions {
   readonly socket: string;
   /** Where errors are written. Never a value: SDK errors carry no payload. */
   readonly log?: string;
   /** Where the installation id is kept. Without one, sessions do not check in. */
   readonly dataDir?: string;
+  /** How often live sessions' inventories are read again. Defaults to a minute. */
+  readonly watchIntervalMs?: number;
   readonly idleMs?: number;
   /** Override the transport, for tests. */
   readonly fetch?: FetchLike;
@@ -101,24 +118,45 @@ export async function startService(
   );
   const transport: FetchLike =
     options.fetch ?? ((url, init) => fetch(url, init as RequestInit));
+  const sessions = new Sessions();
+  // One scanner per key, so a verdict is only ever reused under the key that got it.
+  const scanners = new Map<string, SkillScanner>();
+  const scannerFor = (config: KeyedConfig, hostVersion: string | null): SkillScanner => {
+    const key = JSON.stringify([config.apiKey, config.endpoint]);
+    let scanner = scanners.get(key);
+    if (scanner === undefined) {
+      const guard = guards.get(config, hostVersion);
+      scanner = new SkillScanner(
+        (text) => guard.inspectSkill(text),
+        dataDir === undefined ? null : join(dataDir, `${SKILL_VERDICTS_FILE}-${digestOf(key)}.json`),
+      );
+      scanners.set(key, scanner);
+    }
+    return scanner;
+  };
+  const watch =
+    dataDir === undefined
+      ? null
+      : new InventoryWatch(
+          {
+            fetch: transport,
+            installId: () => (installId ??= installIdIn(dataDir)),
+            surroundings: (at) =>
+              readSurroundings({ home: homedir(), cwd: at, env: process.env, platform: process.platform }),
+            onError: log,
+          },
+          sessions,
+          scannerFor,
+          options.watchIntervalMs,
+        );
   const handlers = new Handlers(
     guards,
-    new Sessions(),
-    dataDir === undefined
+    sessions,
+    watch === null
       ? undefined
-      : (config, hostVersion, cwd) =>
-          sendCheckIn(
-            {
-              fetch: transport,
-              installId: () => (installId ??= installIdIn(dataDir)),
-              surroundings: (at) =>
-                readSurroundings({ home: homedir(), cwd: at, env: process.env, platform: process.platform }),
-              onError: log,
-            },
-            config,
-            hostVersion,
-            cwd,
-          ),
+      : (config, hostVersion, cwd, sessionId) => {
+          void watch.start(sessionId, config, hostVersion, cwd);
+        },
   );
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
 
@@ -200,6 +238,7 @@ export async function startService(
   const close = (): Promise<void> => {
     closing ??= (async () => {
       clearTimeout(idleTimer);
+      watch?.stop();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await guards.closeAll();
       removeStale(options.socket);

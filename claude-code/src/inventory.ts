@@ -42,7 +42,20 @@ export interface SkillItem {
   readonly name: string;
   readonly scope: Scope;
   readonly plugin?: string;
+  /** Leading hex of a SHA-256 of the skill's `SKILL.md`, so a changed skill shows. */
+  readonly digest?: string;
+  /** What the attack check made of the skill; see `skills.ts`. */
+  readonly verdict?: SkillVerdict;
+  /** The rule id or classifier label behind a flag. */
+  readonly reason?: string;
+  readonly severity?: string;
 }
+
+/**
+ * What the attack check made of a skill. `malicious` is a signature match,
+ * `suspicious` the classifier alone, and `unchecked` a check that did not run.
+ */
+export type SkillVerdict = "clean" | "suspicious" | "malicious" | "unchecked";
 
 /**
  * A configured hook. `type` is the hook's own type, or `disable_all` for the
@@ -79,6 +92,22 @@ export interface Surroundings {
   /** A digest of the project directory, never the path, or null without one. */
   readonly project: string | null;
   readonly inventory: Inventory;
+  /**
+   * Where each skill's `SKILL.md` is, by `skillKey`, so it can be read and
+   * checked. Kept on this device: the check-in never sends a path.
+   */
+  readonly skillFiles: ReadonlyMap<string, string>;
+}
+
+/** The key a skill's file is held under in `skillFiles`. */
+export function skillKey(skill: Pick<SkillItem, "scope" | "name">): string {
+  return `${skill.scope}\0${skill.name}`;
+}
+
+/** A skill and the `SKILL.md` it was found by. */
+interface FoundSkill {
+  readonly item: SkillItem;
+  readonly file: string;
 }
 
 export interface Locations {
@@ -173,7 +202,7 @@ export function readSurroundings(locations: Locations): Surroundings {
     ),
   ];
 
-  const skills: SkillItem[] = [
+  const found: FoundSkill[] = [
     ...skillsIn(join(configDir, "skills"), "user"),
     ...syncedSkills(join(configDir, "skills", SYNCED_DIR)),
     ...(cwd === null ? [] : skillsIn(join(cwd, ".claude", "skills"), "project")),
@@ -181,12 +210,17 @@ export function readSurroundings(locations: Locations): Surroundings {
       plugin.item.enabled === false
         ? []
         : skillsIn(join(plugin.path, "skills"), "plugin").map((skill) => ({
-            name: `${pluginName(plugin.item.name)}:${skill.name}`,
-            scope: "plugin" as const,
-            plugin: plugin.item.name,
+            item: {
+              name: `${pluginName(plugin.item.name)}:${skill.item.name}`,
+              scope: "plugin" as const,
+              plugin: plugin.item.name,
+            },
+            file: skill.file,
           })),
     ),
-  ];
+  ].slice(0, MAX_ITEMS);
+  const skills = found.map((skill) => skill.item);
+  const skillFiles = new Map(found.map((skill) => [skillKey(skill.item), skill.file]));
 
   const oauth = record(global?.oauthAccount);
   const email = text(oauth?.emailAddress);
@@ -201,7 +235,7 @@ export function readSurroundings(locations: Locations): Surroundings {
     inventory: {
       mcp_servers: mcpServers.slice(0, MAX_ITEMS),
       plugins: installed.map((plugin) => plugin.item).slice(0, MAX_ITEMS),
-      skills: skills.slice(0, MAX_ITEMS),
+      skills,
       hooks: uniqueNames([
         ...settings.flatMap((file) => hooksIn(file.value, file.scope)),
         ...installed.flatMap((plugin) =>
@@ -209,6 +243,7 @@ export function readSurroundings(locations: Locations): Surroundings {
         ),
       ]).slice(0, MAX_ITEMS),
     },
+    skillFiles,
   };
 }
 
@@ -347,7 +382,7 @@ function installedPlugins(
 }
 
 /** Skills in a directory: each subdirectory holding a `SKILL.md`, by its name. */
-function skillsIn(dir: string, scope: Scope): SkillItem[] {
+function skillsIn(dir: string, scope: Scope): FoundSkill[] {
   let names: string[];
   try {
     names = readdirSync(dir);
@@ -357,7 +392,7 @@ function skillsIn(dir: string, scope: Scope): SkillItem[] {
   return names
     .filter((name) => !name.startsWith(".") && isFile(join(dir, name, "SKILL.md")))
     .sort()
-    .map((name) => ({ name, scope }));
+    .map((name) => ({ item: { name, scope }, file: join(dir, name, "SKILL.md") }));
 }
 
 /** Hooks in one settings file, and the setting that turns every hook off. */
@@ -524,15 +559,25 @@ function uniqueNames(hooks: HookItem[]): HookItem[] {
 }
 
 /** Skills the Claude account syncs down, one directory per sync source. */
-function syncedSkills(dir: string): SkillItem[] {
+function syncedSkills(dir: string): FoundSkill[] {
   let sources: string[];
   try {
     sources = readdirSync(dir).filter((name) => !name.startsWith("."));
   } catch {
     return [];
   }
-  const names = new Set(sources.flatMap((source) => skillsIn(join(dir, source), "synced").map((skill) => skill.name)));
-  return [...names].sort().map((name) => ({ name, scope: "synced" }));
+  const byName = new Map<string, string>();
+  for (const source of [...sources].sort()) {
+    for (const skill of skillsIn(join(dir, source), "synced")) {
+      if (!byName.has(skill.item.name)) {
+        byName.set(skill.item.name, skill.file);
+      }
+    }
+  }
+  return [...byName.keys()].sort().map((name) => ({
+    item: { name, scope: "synced" },
+    file: byName.get(name) as string,
+  }));
 }
 
 /** A plugin id is `name@marketplace`; its skills are invoked as `name:skill`. */

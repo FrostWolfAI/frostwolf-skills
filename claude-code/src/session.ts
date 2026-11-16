@@ -1,3 +1,4 @@
+import type { FlaggedSkill } from "./skills.js";
 import type { Replacement } from "./guard.js";
 import type { KeyedConfig } from "./pool.js";
 
@@ -51,12 +52,30 @@ export class SessionState {
    * of its own, so it is checked with these.
    */
   keyed: { readonly config: KeyedConfig; readonly hostVersion: string | null } | null = null;
+  /** Flagged skills the next prompt announces, and digests already announced. */
+  private readonly skillAlerts: FlaggedSkill[] = [];
+  private readonly announcedSkills = new Set<string>();
   /**
    * Prompts the mod already cloaked, as they were passed on. The prompt hook
    * that runs on each of them next does not check its text a second time.
    */
   private readonly cloakedPrompts: string[] = [];
   lastSeen: number;
+
+  /** Queue skills to announce, leaving out any this session already heard about. */
+  queueSkillAlerts(skills: readonly FlaggedSkill[]): void {
+    for (const skill of skills) {
+      if (!this.announcedSkills.has(skill.digest)) {
+        this.announcedSkills.add(skill.digest);
+        this.skillAlerts.push(skill);
+      }
+    }
+  }
+
+  /** Take the queued skill alerts. */
+  takeSkillAlerts(): FlaggedSkill[] {
+    return this.skillAlerts.splice(0);
+  }
 
   constructor(now: number) {
     this.lastSeen = now;

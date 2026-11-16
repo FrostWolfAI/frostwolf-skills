@@ -1,5 +1,17 @@
-/** What to do with a prompt that carries personal data. */
-export type PromptPolicy = "block" | "warn";
+/**
+ * What to do with a prompt that carries personal data.
+ *
+ * `cloak` replaces it in place through the prompt mod, and where the mod does
+ * not run sends the prompt as typed with a warning. `block` also cloaks through
+ * the mod, but where it does not run refuses the prompt. `warn` never cloaks.
+ */
+export type PromptPolicy = "cloak" | "block" | "warn";
+
+/**
+ * What to do when a tool call, an attached file, or a failed call's output is
+ * found to be an attack. `warn` lets it through and says so; `block` stops it.
+ */
+export type ThreatPolicy = "warn" | "block";
 
 /** What to do when FrostWolf cannot check something. */
 export type UnavailablePolicy = "block" | "allow";
@@ -14,6 +26,7 @@ export interface HookConfig {
   readonly endpoint: string | null;
   readonly promptPersonalData: PromptPolicy;
   readonly onUnavailable: UnavailablePolicy;
+  readonly onThreat: ThreatPolicy;
   readonly display: DisplayMode;
 }
 
@@ -29,16 +42,17 @@ const ENV_PREFIX = "FROSTWOLF_";
  * A plugin option wins over the matching `FROSTWOLF_` variable, so a project
  * that sets both gets what the plugin was configured with. An empty value is
  * unset, which is what an untouched plugin option holds. A value outside the
- * allowed set falls back to the default. Every default is the strict one except
- * `on_unavailable`, which lets through what could not be checked, so a slow or
- * unreachable detector never stops a session.
+ * allowed set falls back to the default. Every default keeps the session
+ * going: data is cloaked and attacks are taken out or reported, but nothing is
+ * stopped unless an option says to.
  */
 export function configFromEnv(env: NodeJS.ProcessEnv): HookConfig {
   return {
     apiKey: setting(env, "API_KEY"),
     endpoint: setting(env, "ENDPOINT"),
-    promptPersonalData: choice(env, "PROMPT_PERSONAL_DATA", ["block", "warn"]),
+    promptPersonalData: choice(env, "PROMPT_PERSONAL_DATA", ["cloak", "block", "warn"]),
     onUnavailable: choice(env, "ON_UNAVAILABLE", ["allow", "block"]),
+    onThreat: choice(env, "ON_THREAT", ["warn", "block"]),
     display: choice(env, "DISPLAY", ["restore", "tokens"]),
   };
 }

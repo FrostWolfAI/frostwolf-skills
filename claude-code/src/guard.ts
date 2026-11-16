@@ -240,6 +240,17 @@ export class AgentGuard {
     return this.client.guard.cloak.restore(value, { context, onDenied });
   }
 
+  /**
+   * Run the attack check on a skill's instructions.
+   *
+   * The model check reports rather than decides, so the result separates a
+   * signature match from the classifier alone. Never rejects: an outage comes
+   * back as a verdict that scanned nothing.
+   */
+  inspectSkill(text: string): Promise<InspectionResult> {
+    return this.client.guard.scan(text, { semantic: "report" });
+  }
+
   /** Validate one tool call before it runs. */
   validateCall(
     name: string,

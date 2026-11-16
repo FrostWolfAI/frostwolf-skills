@@ -27,7 +27,6 @@
               "${CLAUDE_PLUGIN_ROOT}/dist/hook.mjs"
             ],
             "timeout": 30,
-            "onFailure": "block",
             "statusMessage": "FrostWolf: checking prompt"
           }
         ]
@@ -74,8 +73,7 @@
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/dist/hook.mjs"
             ],
-            "timeout": 60,
-            "onFailure": "block"
+            "timeout": 60
           }
         ]
       }

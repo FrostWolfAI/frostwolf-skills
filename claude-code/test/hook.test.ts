@@ -142,12 +142,13 @@ describe("runHook without a service, told to allow", () => {
 });
 
 describe("configFromEnv", () => {
-  it("defaults every policy to the strict choice, except letting unchecked output through", () => {
+  it("defaults every policy to one that keeps the session going", () => {
     expect(configFromEnv({})).toEqual({
       apiKey: null,
       endpoint: null,
-      promptPersonalData: "block",
+      promptPersonalData: "cloak",
       onUnavailable: "allow",
+      onThreat: "warn",
       display: "restore",
     });
   });
