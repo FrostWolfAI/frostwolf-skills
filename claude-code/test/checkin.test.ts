@@ -2,7 +2,8 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { checkInBody, hostVersionOf, installIdIn } from "../src/checkin.js";
+import { checkInBody, hostVersionOf, installIdIn, userAgentOf } from "../src/checkin.js";
+import { PLUGIN_VERSION } from "../src/version.js";
 
 /** Permission bits that let anyone but the owner in. */
 const GROUP_AND_OTHER_BITS = 0o077;
@@ -59,5 +60,14 @@ describe("checkInBody", () => {
     expect(Object.keys(body).sort()).toEqual(["device", "install_id", "integration", "versions"]);
     expect(Object.keys(body.device as object).sort()).toEqual(["arch", "name", "os", "os_version"]);
     expect(Object.keys(body.versions as object).sort()).toEqual(["client", "host", "runtime"]);
+  });
+});
+
+describe("userAgentOf", () => {
+  it("names the plugin, Claude Code, and the runtime, and nothing about the person", () => {
+    expect(userAgentOf("2.1.299")).toBe(
+      `frostwolf-claude-code/${PLUGIN_VERSION} claude-code/2.1.299 node/${process.versions.node} (${process.platform}; ${process.arch})`,
+    );
+    expect(userAgentOf(null)).toContain("claude-code/unknown");
   });
 });

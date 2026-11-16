@@ -74,6 +74,20 @@ export function installIdIn(dataDir: string): string {
 }
 
 /**
+ * The user-agent a check-in is sent with: the plugin, the Claude Code it runs
+ * inside, and the runtime and platform under both. It names software, never the
+ * person or the machine, so the console can tell an outdated client apart.
+ */
+export function userAgentOf(hostVersion: string | null): string {
+  return [
+    `frostwolf-claude-code/${PLUGIN_VERSION}`,
+    `claude-code/${hostVersion ?? "unknown"}`,
+    `node/${process.versions.node}`,
+    `(${process.platform}; ${process.arch})`,
+  ].join(" ");
+}
+
+/**
  * What a check-in reports. Never payload content. The surroundings, when read,
  * add the Claude account the device is signed in to and what is installed
  * beside the plugin, by name and shape only; see `inventory.ts`.
@@ -140,6 +154,7 @@ export function sendCheckIn(
       headers: {
         authorization: `Bearer ${config.apiKey}`,
         "content-type": "application/json",
+        "user-agent": userAgentOf(hostVersion),
       },
       body: JSON.stringify(checkInBody(deps.installId(), hostVersion, surroundings)),
       signal: AbortSignal.timeout(CHECKIN_TIMEOUT_MS),

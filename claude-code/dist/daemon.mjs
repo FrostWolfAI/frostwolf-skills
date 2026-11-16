@@ -10,7 +10,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.8";
+var PLUGIN_VERSION = "0.1.9";
 
 // src/checkin.ts
 var INTEGRATION = "claude-code";
@@ -33,6 +33,14 @@ function installIdIn(dataDir) {
   writeFileSync(file, `${created}
 `, { mode: OWNER_ONLY_FILE });
   return created;
+}
+function userAgentOf(hostVersion) {
+  return [
+    `frostwolf-claude-code/${PLUGIN_VERSION}`,
+    `claude-code/${hostVersion ?? "unknown"}`,
+    `node/${process.versions.node}`,
+    `(${process.platform}; ${process.arch})`
+  ].join(" ");
 }
 function checkInBody(installId, hostVersion, surroundings = null) {
   return {
@@ -69,7 +77,8 @@ function sendCheckIn(deps, config, hostVersion, cwd) {
       method: "POST",
       headers: {
         authorization: `Bearer ${config.apiKey}`,
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "user-agent": userAgentOf(hostVersion)
       },
       body: JSON.stringify(checkInBody(deps.installId(), hostVersion, surroundings)),
       signal: AbortSignal.timeout(CHECKIN_TIMEOUT_MS)
