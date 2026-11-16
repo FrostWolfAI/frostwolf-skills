@@ -38,8 +38,27 @@ const SESSION_VAULT_TTL_MS = 12 * 60 * 60 * 1000;
 /** Bytes of the key tokens are derived under, generated per service. */
 const KEY_BYTES = 32;
 
-/** Batches of one call checked at the same time. */
-const MAX_PARALLEL_BATCHES = 4;
+/**
+ * Batches of one call checked at the same time.
+ *
+ * The detectors answer one request at a time, so more in flight does not finish
+ * sooner. It only makes each request wait behind the others until it times out.
+ */
+const MAX_PARALLEL_BATCHES = 2;
+
+/**
+ * How long one check may take before it counts as unanswered.
+ *
+ * A full batch costs the detectors about four and a half seconds on their own,
+ * so the SDK's five-second default refused a batch that was only slow.
+ */
+export const CHECK_TIMEOUT_MS = 15_000;
+
+/**
+ * Reasons a second attempt cannot change. Everything else is the control plane
+ * or a detector not answering, which the next request usually gets past.
+ */
+const FINAL_REASONS: ReadonlySet<string> = new Set(["disabled", "too_large"]);
 
 /** How long a checked batch is reused for identical text, such as a file read twice. */
 const BATCH_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -103,6 +122,12 @@ export interface ProtectTextsOptions {
   readonly keep?: (original: string) => boolean;
   /** What the model attack check may do. A signature match blocks whatever this says. */
   readonly semanticPass?: SemanticMode;
+  /**
+   * When the answer is needed by, in epoch milliseconds. A batch that went
+   * unanswered is asked again only while a whole check still fits before it.
+   * Without one, nothing is asked twice.
+   */
+  readonly deadline?: number;
 }
 
 /** What checking a list of texts found and did. */
@@ -154,6 +179,7 @@ export class AgentGuard {
       apiKey: config.apiKey,
       ...(config.endpoint === null ? {} : { endpoint: config.endpoint }),
       onScanError: config.onUnavailable,
+      timeoutMs: CHECK_TIMEOUT_MS,
       onError: deps.onError,
       ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
       ...(deps.source === undefined ? {} : { source: deps.source }),
@@ -176,12 +202,12 @@ export class AgentGuard {
   async protectTexts(
     texts: readonly string[],
     context: CloakContext,
-    { onMatch, keep = () => false, semanticPass = "enforce" }: ProtectTextsOptions,
+    { onMatch, keep = () => false, semanticPass = "enforce", deadline }: ProtectTextsOptions,
   ): Promise<TextsOutcome> {
     const pieces = piecesOf(texts, MAX_DETECT_CHARS);
     const batches = packPieces(pieces, MAX_DETECT_CHARS);
     const outcomes = await mapLimit(batches, MAX_PARALLEL_BATCHES, (batch) =>
-      this.checkCached(batch, context, onMatch, semanticPass),
+      this.checkCached(batch, context, onMatch, semanticPass, deadline),
     );
 
     const { texts: rewritten, replaced } = putBack(
@@ -240,6 +266,7 @@ export class AgentGuard {
     context: CloakContext,
     onMatch: OnMatch,
     semanticPass: SemanticMode,
+    deadline: number | undefined,
   ): Promise<BatchOutcome> {
     const key = createHash("sha256")
       .update(
@@ -259,7 +286,10 @@ export class AgentGuard {
     }
     this.cache.delete(key);
 
-    const outcome = await this.checkBatch(pieces, context, onMatch, semanticPass);
+    let outcome = await this.checkBatch(pieces, context, onMatch, semanticPass);
+    if (this.worthAskingAgain(outcome, deadline)) {
+      outcome = await this.checkBatch(pieces, context, onMatch, semanticPass);
+    }
 
     // An unchecked batch is never reused: the next attempt may get an answer.
     if (outcome.unavailable === null) {
@@ -277,6 +307,18 @@ export class AgentGuard {
     }
 
     return outcome;
+  }
+
+  private worthAskingAgain(
+    outcome: BatchOutcome,
+    deadline: number | undefined,
+  ): boolean {
+    return (
+      outcome.unavailable !== null &&
+      !FINAL_REASONS.has(outcome.unavailable) &&
+      deadline !== undefined &&
+      deadline - this.now() >= CHECK_TIMEOUT_MS
+    );
   }
 
   private async checkBatch(

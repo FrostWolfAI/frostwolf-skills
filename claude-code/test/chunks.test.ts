@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { joinPieces, packPieces, piecesOf, splitText } from "../src/chunks.js";
+import { capTexts, joinPieces, packPieces, piecesOf, splitText, totalLength } from "../src/chunks.js";
 
 describe("splitText", () => {
   it("keeps a text that fits whole", () => {
@@ -61,5 +61,26 @@ describe("joinPieces", () => {
       "ONE\nTWO\n",
       "THREE",
     ]);
+  });
+});
+
+describe("capTexts", () => {
+  it("keeps texts that fit untouched", () => {
+    expect(capTexts(["ab", "cd"], 10)).toEqual({ texts: ["ab", "cd"], omitted: 0 });
+  });
+
+  it("cuts after the last newline in reach and empties later texts", () => {
+    const capped = capTexts(["one\ntwo\nthree", "four"], 10);
+
+    expect(capped.texts).toEqual(["one\ntwo\n", ""]);
+    expect(capped.omitted).toBe("three".length + "four".length);
+    expect(totalLength(capped.texts)).toBeLessThanOrEqual(10);
+  });
+
+  it("cuts a line with no newline at the limit, never inside a surrogate pair", () => {
+    const capped = capTexts(["abc😀def"], 4);
+
+    expect(capped.texts).toEqual(["abc"]);
+    expect(capped.omitted).toBe("😀def".length);
   });
 });

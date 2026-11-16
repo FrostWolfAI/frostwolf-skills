@@ -16,10 +16,13 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+/** A configuration told to refuse what it could not check. */
+const BLOCK = { FROSTWOLF_API_KEY: "fw-test-key", FROSTWOLF_ON_UNAVAILABLE: "block" };
+
 /** Run a hook with no service behind its socket and none allowed to start. */
 function runAlone(
   input: Record<string, unknown>,
-  env: NodeJS.ProcessEnv = { FROSTWOLF_API_KEY: "fw-test-key" },
+  env: NodeJS.ProcessEnv = BLOCK,
 ): Promise<HookOutput | null> {
   return runHook({
     stdin: JSON.stringify({ session_id: "FW-TEST-SESSION-A", ...input }),
@@ -33,7 +36,7 @@ function specific(output: HookOutput | null): Record<string, unknown> {
   return (output?.hookSpecificOutput ?? {}) as Record<string, unknown>;
 }
 
-describe("runHook without a service", () => {
+describe("runHook without a service, told to block", () => {
   it("refuses a prompt", async () => {
     const output = await runAlone({ hook_event_name: "UserPromptSubmit", prompt: "hi" });
 
@@ -92,7 +95,7 @@ describe("runHook without a service", () => {
   it("refuses when the socket path cannot be resolved", async () => {
     const output = await runHook({
       stdin: JSON.stringify({ session_id: "s", hook_event_name: "UserPromptSubmit", prompt: "hi" }),
-      env: {},
+      env: BLOCK,
       paths: () => {
         throw new Error("not a private directory");
       },
@@ -139,12 +142,12 @@ describe("runHook without a service, told to allow", () => {
 });
 
 describe("configFromEnv", () => {
-  it("defaults every policy to the strict choice", () => {
+  it("defaults every policy to the strict choice, except letting unchecked output through", () => {
     expect(configFromEnv({})).toEqual({
       apiKey: null,
       endpoint: null,
       promptPersonalData: "block",
-      onUnavailable: "block",
+      onUnavailable: "allow",
       display: "restore",
     });
   });
@@ -165,6 +168,6 @@ describe("configFromEnv", () => {
   });
 
   it("falls back to the default for a value outside the allowed set", () => {
-    expect(configFromEnv({ FROSTWOLF_ON_UNAVAILABLE: "sometimes" }).onUnavailable).toBe("block");
+    expect(configFromEnv({ FROSTWOLF_ON_UNAVAILABLE: "sometimes" }).onUnavailable).toBe("allow");
   });
 });

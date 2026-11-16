@@ -39,6 +39,8 @@ export interface CheckInRecord {
 
 export class FakePlane {
   mode: PlaneMode = "answer";
+  /** Scan requests still to refuse with a 503 before answering again. */
+  failNext = 0;
   refuseCheckIns = false;
   readonly scans: ScanRecord[] = [];
   readonly checkIns: CheckInRecord[] = [];
@@ -66,6 +68,10 @@ export class FakePlane {
     }
     if (path !== "/v1/scan") {
       return { status: 404, json: {} };
+    }
+    if (this.failNext > 0) {
+      this.failNext--;
+      return { status: 503, json: { error: "unavailable" } };
     }
     if (this.mode === "scan_down") {
       return { status: 503, json: { error: "unavailable" } };

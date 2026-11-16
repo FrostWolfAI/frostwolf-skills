@@ -2,7 +2,9 @@ import { spawn } from "node:child_process";
 import { request } from "node:http";
 import { hostVersionOf } from "./checkin.js";
 import { configFromEnv, type HookConfig } from "./config.js";
-import { HEALTH_PATH, HOOK_PATH } from "./protocol.js";
+import { DEADLINES_MS, HEALTH_PATH, HOOK_PATH } from "./protocol.js";
+
+export { DEADLINES_MS };
 import { stringsOf } from "./leaves.js";
 import * as say from "./messages.js";
 import { blockPrompt, denyTool, notice, stopBatch } from "./outputs.js";
@@ -11,28 +13,10 @@ import { hasTokens } from "./tokens.js";
 import {
   isRecord,
   parseHookInput,
-  type HookEvent,
   type HookInput,
   type HookOutput,
   type ServiceRequest,
 } from "./types.js";
-
-/**
- * How long each event may take end to end.
- *
- * Each is shorter than the event's `timeout` in `hooks.json`, so a slow answer
- * still leaves time to print the fail-closed decision. A hook Claude Code
- * cancels prints nothing, and for most events nothing means go ahead.
- */
-export const DEADLINES_MS: Readonly<Record<HookEvent, number>> = {
-  SessionStart: 10_000,
-  UserPromptSubmit: 25_000,
-  PreToolUse: 25_000,
-  PostToolUse: 50_000,
-  PostToolBatch: 50_000,
-  MessageDisplay: 8_000,
-  SessionEnd: 4_000,
-};
 
 /** How long a freshly started service gets to come up. */
 const SERVICE_START_MS = 5_000;
@@ -102,8 +86,8 @@ export async function runHook(
 /**
  * The answer for an event FrostWolf could not handle.
  *
- * With `on_unavailable` set to `block`, the default, every gate refuses. With
- * `allow`, they let things through, except a tool call carrying a token: run
+ * With `on_unavailable` set to `block`, every gate refuses. With `allow`, the
+ * default, they let things through, except a tool call carrying a token: run
  * unrestored, it would put the token itself into a file or a command.
  */
 export function failClosedFor(

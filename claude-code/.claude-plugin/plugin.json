@@ -1,7 +1,7 @@
 {
   "name": "frostwolf",
   "displayName": "FrostWolf",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Cloak personal data and secrets before Claude sees them, and block prompt injection, in every Claude Code session.",
   "author": {
     "name": "FrostWolf",
@@ -44,12 +44,12 @@
     "on_unavailable": {
       "type": "string",
       "title": "When FrostWolf is unreachable",
-      "description": "block refuses prompts, tool calls, and tool output FrostWolf could not check. allow lets them through unchecked.",
+      "description": "allow lets prompts and tool output FrostWolf could not check through unchecked, and says so. block refuses them.",
       "options": [
-        "block",
-        "allow"
+        "allow",
+        "block"
       ],
-      "default": "block"
+      "default": "allow"
     },
     "display": {
       "type": "string",

@@ -37,7 +37,7 @@ for it instead, install from a Claude Code session:
 
 | Hook | What FrostWolf does |
 | --- | --- |
-| `PostToolUse` | Replaces personal data and secrets in every tool result with tokens such as `[[email:f098b0367449]]`, and takes injected instructions out, before Claude sees the result. |
+| `PostToolUse` | Replaces personal data and secrets in every tool result with tokens such as `[[email:f098b0367449]]`, and takes injected instructions out, before Claude sees the result. A result longer than 48,000 characters is cut to what can be checked in time, and Claude is told what was left out. |
 | `PreToolUse` | Puts the real values back into a tool call, so a file Claude writes or a command it runs gets the original. Validates shell, web fetch, and MCP calls before they run. |
 | `PostToolBatch` | Checks every result exactly as Claude will receive it, and stops the turn before the next model call if one was not cloaked. |
 | `prompt.submit` (mod) | Cloaks personal data and secrets in the prompt you type before Claude sees it, and sends the cloaked prompt. Claude works with tokens; your screen and your tool calls get the values. Needs Claude Code 2.1.286 or newer. |
@@ -55,7 +55,7 @@ variable instead.
 | `api_key` | `FROSTWOLF_API_KEY` | none | Your API key. Required. Set it as a plugin option: the prompt mod does not load without it. |
 | `endpoint` | `FROSTWOLF_ENDPOINT` | `https://api.frostwolf.app` | Control plane base URL. |
 | `prompt_personal_data` | `FROSTWOLF_PROMPT_PERSONAL_DATA` | `block` | `block` cloaks the prompt, or, where the mod does not run, refuses it and offers a cloaked version. `warn` sends as typed and tells you. |
-| `on_unavailable` | `FROSTWOLF_ON_UNAVAILABLE` | `block` | `block` refuses what FrostWolf could not check. `allow` lets it through. |
+| `on_unavailable` | `FROSTWOLF_ON_UNAVAILABLE` | `allow` | `allow` lets through what FrostWolf could not check and says so. `block` refuses it. A tool call carrying a token is refused either way when the value cannot be put back. |
 | `display` | `FROSTWOLF_DISPLAY` | `restore` | `restore` shows real values. `tokens` shows tokens. |
 
 ## Without the plugin

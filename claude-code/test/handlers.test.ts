@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { HookConfig } from "../src/config.js";
+import { MAX_RESULT_CHARS } from "../src/chunks.js";
 import { Handlers } from "../src/handlers.js";
 import { GuardPool } from "../src/pool.js";
 import { REMOVED_MARKER } from "../src/protocol.js";
@@ -671,6 +672,121 @@ describe("PostToolBatch", () => {
         tool_calls: [{ tool_name: "Read", tool_use_id: id, tool_response: "1\ttext\n" }],
       },
       config,
+    );
+
+    expect(output).toBeNull();
+  });
+});
+
+function bashResult(stdout: string) {
+  return { stdout, stderr: "", interrupted: false, isImage: false };
+}
+
+async function runBash(stdout: string, config: HookConfig = CONFIG) {
+  const id = `toolu_${nextId++}`;
+  const output = await run(
+    {
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "cat big.log" },
+      tool_response: bashResult(stdout),
+      tool_use_id: id,
+    },
+    config,
+  );
+  const updated = specific(output).updatedToolOutput as ReturnType<typeof bashResult> | undefined;
+  return { id, output, updated };
+}
+
+/** Lines of filler longer than one result may be, with a value past the cut. */
+function longOutput(): string {
+  const line = "build step finished without warnings\n";
+  const filler = line.repeat(Math.ceil((MAX_RESULT_CHARS + 1000) / line.length));
+  return `${filler}email: ${EMAIL}\n`;
+}
+
+describe("slow or failing checks", () => {
+  it("asks again when a check goes unanswered, and cloaks the answer", async () => {
+    plane.failNext = 1;
+    const { content } = await readFile(`email: ${EMAIL}\n`);
+
+    expect(content).not.toContain(EMAIL);
+    expect(tokensIn(content ?? "")).toHaveLength(1);
+  });
+
+  it("records a result unchecked when the second attempt goes unanswered too", async () => {
+    plane.failNext = 2;
+    const { id, output: post } = await readFile(`email: ${EMAIL}\n`);
+    expect(post).toBeNull();
+
+    const output = await run({
+      hook_event_name: "PostToolBatch",
+      tool_calls: [{ tool_name: "Read", tool_use_id: id, tool_response: `1\temail: ${EMAIL}\n` }],
+    });
+
+    expect(output?.decision).toBe("block");
+    expect(String(output?.reason)).toContain("did not answer in time");
+  });
+
+  it("tells Claude an unchecked result went through when told to allow", async () => {
+    plane.mode = "scan_down";
+    const { output } = await readFile("text\n", { ...CONFIG, onUnavailable: "allow" });
+
+    expect(specific(output).updatedToolOutput).toBeUndefined();
+    expect(String(specific(output).additionalContext)).toContain("let it through unchecked");
+  });
+
+  it("cuts a result too long to check in time, and says so", async () => {
+    const stdout = longOutput();
+    const { output, updated } = await runBash(stdout);
+
+    expect(updated?.stdout.length).toBeLessThanOrEqual(MAX_RESULT_CHARS);
+    expect(updated?.stdout).not.toContain(EMAIL);
+    expect(String(specific(output).additionalContext)).toContain("left out the remaining");
+    expect(plane.scans.every((scan) => !scan.text.includes(EMAIL))).toBe(true);
+  });
+
+  it("passes a cut result that arrives cut", async () => {
+    const { id, updated } = await runBash(longOutput());
+
+    const output = await run({
+      hook_event_name: "PostToolBatch",
+      tool_calls: [{ tool_name: "Bash", tool_use_id: id, tool_response: updated }],
+    });
+
+    expect(output).toBeNull();
+  });
+
+  it("stops a cut result that arrives whole, because its tail was never checked", async () => {
+    const stdout = longOutput();
+    const { id } = await runBash(stdout);
+
+    const output = await run({
+      hook_event_name: "PostToolBatch",
+      tool_calls: [{ tool_name: "Bash", tool_use_id: id, tool_response: bashResult(stdout) }],
+    });
+
+    expect(output?.decision).toBe("block");
+    expect(String(output?.reason)).toContain("did not apply");
+  });
+
+  it("stops failed-call output too long to check when told to block", async () => {
+    const output = await run({
+      hook_event_name: "PostToolBatch",
+      tool_calls: [{ tool_name: "Bash", tool_use_id: "toolu_failed_long", tool_response: longOutput() }],
+    });
+
+    expect(output?.decision).toBe("block");
+    expect(String(output?.reason)).toContain("too_large");
+  });
+
+  it("passes failed-call output too long to check when told to allow", async () => {
+    const output = await run(
+      {
+        hook_event_name: "PostToolBatch",
+        tool_calls: [{ tool_name: "Bash", tool_use_id: "toolu_failed_long", tool_response: longOutput() }],
+      },
+      { ...CONFIG, onUnavailable: "allow" },
     );
 
     expect(output).toBeNull();

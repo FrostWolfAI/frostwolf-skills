@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { RestoreDeniedError, type CloakContext } from "@frostwolfai/sdk";
 import type { HookConfig } from "./config.js";
+import { capTexts, MAX_RESULT_CHARS, totalLength } from "./chunks.js";
 import { entityCounts, type AgentGuard, type TextsOutcome } from "./guard.js";
 import { stringsOf, TooDeepError, withStrings } from "./leaves.js";
 import { attachedFiles, withoutMentions, type Attached } from "./mentions.js";
@@ -17,7 +18,7 @@ import {
   stopBatch,
 } from "./outputs.js";
 import type { GuardPool, KeyedConfig } from "./pool.js";
-import { REMOVED_MARKER } from "./protocol.js";
+import { DEADLINES_MS, REMOVED_MARKER } from "./protocol.js";
 import type { SessionState, Sessions, ToolRecord } from "./session.js";
 import { hasTokens, tokensIn } from "./tokens.js";
 import type {
@@ -67,6 +68,12 @@ const WRITE_TOOLS: ReadonlySet<string> = new Set([
  */
 const TYPED_PROMPT_ON_MATCH = "allow";
 const TYPED_PROMPT_SEMANTIC_PASS = "report";
+
+/**
+ * Time kept back from an event's deadline: the hook process starting, the
+ * service starting if it was not running, and the answer travelling back.
+ */
+const RESPONSE_MARGIN_MS = 5_000;
 
 /** Narrows each session's Cloak context to this integration. */
 const CONTEXT_SCOPE = "claude-code";
@@ -249,6 +256,7 @@ export class Handlers {
             onMatch: TYPED_PROMPT_ON_MATCH,
             keep: known,
             semanticPass: TYPED_PROMPT_SEMANTIC_PASS,
+            deadline: this.deadlineOf("UserPromptSubmit"),
           }),
       attachedFiles(input.prompt, input.cwd),
     ]);
@@ -317,6 +325,7 @@ export class Handlers {
     const outcome = await guard.protectTexts([file.text], context, {
       onMatch: "block",
       keep: known,
+      deadline: this.deadlineOf("UserPromptSubmit"),
     });
 
     if (outcome.attack !== null) {
@@ -414,27 +423,42 @@ export class Handlers {
     }
 
     session.addLiterals(texts.flatMap(tokensIn));
-    const outcome = await guard.protectTexts(texts, context, {
+    const cut = totalLength(texts) > MAX_RESULT_CHARS ? capTexts(texts, MAX_RESULT_CHARS) : null;
+    const outcome = await guard.protectTexts(cut?.texts ?? texts, context, {
       onMatch: "sanitise",
       keep: knownTo(input.cwd),
+      deadline: this.deadlineOf("PostToolUse"),
     });
 
-    if (outcome.unavailable !== null && config.onUnavailable === "block") {
-      session.records.set(
-        input.tool_use_id,
-        this.unchecked(outcome.unavailable),
-      );
-      return null;
+    if (outcome.unavailable !== null) {
+      if (config.onUnavailable === "block") {
+        session.records.set(
+          input.tool_use_id,
+          this.unchecked(outcome.unavailable),
+        );
+        return null;
+      }
+      session.records.set(input.tool_use_id, {
+        status: "cleared",
+        replaced: [],
+        createdAt: this.now(),
+      });
+      return annotateToolOutput(say.passedUnchecked(input.tool_name, outcome.unavailable));
     }
 
     session.records.set(input.tool_use_id, {
       status: "cleared",
       replaced: outcome.replaced,
       createdAt: this.now(),
+      ...(cut === null ? {} : { maxChars: MAX_RESULT_CHARS }),
     });
 
-    const note = attackNote(input.tool_name, outcome);
-    if (!outcome.changed) {
+    const notes = [
+      attackNote(input.tool_name, outcome),
+      cut === null ? null : say.resultCut(input.tool_name, totalLength(outcome.texts), cut.omitted),
+    ].filter((note) => note !== null);
+    const note = notes.length === 0 ? null : notes.join("\n\n");
+    if (!outcome.changed && cut === null) {
       return note === null ? null : annotateToolOutput(note);
     }
     return rewriteToolOutput(withStrings(input.tool_response, outcome.texts), note);
@@ -501,13 +525,22 @@ export class Handlers {
       throw error;
     }
 
+    if (totalLength(texts) > MAX_RESULT_CHARS) {
+      return config.onUnavailable === "block"
+        ? say.couldNotCheck(call.tool_name, "too_large")
+        : null;
+    }
+
     const outcome = await guard.protectTexts(texts, context, {
       onMatch: "sanitise",
       keep: known,
+      deadline: this.deadlineOf("PostToolBatch"),
     });
 
-    if (outcome.unavailable !== null && config.onUnavailable === "block") {
-      return say.couldNotCheck(call.tool_name, outcome.unavailable);
+    if (outcome.unavailable !== null) {
+      return config.onUnavailable === "block"
+        ? say.couldNotCheck(call.tool_name, outcome.unavailable)
+        : null;
     }
     const entities = entityCounts(outcome.replaced, known);
     if (entities.size > 0) {
@@ -549,6 +582,11 @@ export class Handlers {
 
   private unchecked(reason: string): ToolRecord {
     return { status: "unchecked", reason, createdAt: this.now() };
+  }
+
+  /** When an event's answer is needed by, so a retry never outlives the hook. */
+  private deadlineOf(event: HookEvent): number {
+    return this.now() + DEADLINES_MS[event] - RESPONSE_MARGIN_MS;
   }
 }
 
@@ -630,7 +668,15 @@ function attackNote(tool: string, outcome: TextsOutcome): string | null {
  * up inside an unrelated word cannot cause on its own.
  */
 function rewriteLanded(record: ToolRecord, texts: readonly string[]): boolean {
-  if (record.status !== "cleared" || record.replaced.length === 0) {
+  if (record.status !== "cleared") {
+    return true;
+  }
+  // A cut result that arrives longer than the cut was not cut, and its tail
+  // was never checked.
+  if (record.maxChars !== undefined && totalLength(texts) > record.maxChars) {
+    return false;
+  }
+  if (record.replaced.length === 0) {
     return true;
   }
 

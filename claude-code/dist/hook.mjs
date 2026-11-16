@@ -13,7 +13,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.9";
+var PLUGIN_VERSION = "0.1.10";
 
 // src/checkin.ts
 var VERSION = /^\d+\.\d+\.\d+/;
@@ -35,7 +35,7 @@ function configFromEnv(env) {
     apiKey: setting(env, "API_KEY"),
     endpoint: setting(env, "ENDPOINT"),
     promptPersonalData: choice(env, "PROMPT_PERSONAL_DATA", ["block", "warn"]),
-    onUnavailable: choice(env, "ON_UNAVAILABLE", ["block", "allow"]),
+    onUnavailable: choice(env, "ON_UNAVAILABLE", ["allow", "block"]),
     display: choice(env, "DISPLAY", ["restore", "tokens"])
   };
 }
@@ -57,6 +57,15 @@ function choice(env, name, allowed) {
 var HOOK_PATH = "/hook";
 var HEALTH_PATH = "/health";
 var REMOVED_MARKER = "[FROSTWOLF_REMOVED]";
+var DEADLINES_MS = {
+  SessionStart: 1e4,
+  UserPromptSubmit: 25e3,
+  PreToolUse: 25e3,
+  PostToolUse: 5e4,
+  PostToolBatch: 5e4,
+  MessageDisplay: 8e3,
+  SessionEnd: 4e3
+};
 
 // src/leaves.ts
 var BINARY_KEYS = /* @__PURE__ */ new Set(["base64"]);
@@ -190,15 +199,6 @@ function isRecord(value) {
 }
 
 // src/hook.ts
-var DEADLINES_MS = {
-  SessionStart: 1e4,
-  UserPromptSubmit: 25e3,
-  PreToolUse: 25e3,
-  PostToolUse: 5e4,
-  PostToolBatch: 5e4,
-  MessageDisplay: 8e3,
-  SessionEnd: 4e3
-};
 var SERVICE_START_MS = 5e3;
 var SERVICE_POLL_MS = 50;
 var NOT_LISTENING = /* @__PURE__ */ new Set([

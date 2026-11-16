@@ -29,14 +29,16 @@ const ENV_PREFIX = "FROSTWOLF_";
  * A plugin option wins over the matching `FROSTWOLF_` variable, so a project
  * that sets both gets what the plugin was configured with. An empty value is
  * unset, which is what an untouched plugin option holds. A value outside the
- * allowed set falls back to the default, and every default is the strict one.
+ * allowed set falls back to the default. Every default is the strict one except
+ * `on_unavailable`, which lets through what could not be checked, so a slow or
+ * unreachable detector never stops a session.
  */
 export function configFromEnv(env: NodeJS.ProcessEnv): HookConfig {
   return {
     apiKey: setting(env, "API_KEY"),
     endpoint: setting(env, "ENDPOINT"),
     promptPersonalData: choice(env, "PROMPT_PERSONAL_DATA", ["block", "warn"]),
-    onUnavailable: choice(env, "ON_UNAVAILABLE", ["block", "allow"]),
+    onUnavailable: choice(env, "ON_UNAVAILABLE", ["allow", "block"]),
     display: choice(env, "DISPLAY", ["restore", "tokens"]),
   };
 }

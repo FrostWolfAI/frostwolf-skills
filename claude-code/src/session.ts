@@ -6,6 +6,8 @@ export type ToolRecord =
   | {
       readonly status: "cleared";
       readonly replaced: readonly Replacement[];
+      /** Set when the result was cut to what was checked: the most it may hold. */
+      readonly maxChars?: number;
       readonly createdAt: number;
     }
   | {

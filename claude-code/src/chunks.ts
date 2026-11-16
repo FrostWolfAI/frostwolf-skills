@@ -97,3 +97,59 @@ export function joinPieces(
 function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff;
 }
+
+/**
+ * Most characters of one tool result that are checked.
+ *
+ * The hook has fifty seconds and a full batch costs the detectors about four and
+ * a half, so a result much longer than four batches cannot be checked in time,
+ * even once, and a result that cannot be checked is stopped. The rest is left
+ * out instead, so Claude gets what was checked and is told what was cut.
+ */
+export const MAX_RESULT_CHARS = 4 * MAX_DETECT_CHARS;
+
+/** What capping a list of texts kept. */
+export interface Capped {
+  /** The texts, each cut short or emptied where the budget ran out. */
+  readonly texts: string[];
+  /** Characters left out. */
+  readonly omitted: number;
+}
+
+/**
+ * Keep at most `limit` characters across a list of texts, in order.
+ *
+ * The text the budget runs out in is cut just after a newline when there is one
+ * in the part kept, and never inside a surrogate pair. Every later text is
+ * emptied, so the list keeps its length and a value rebuilt from it its shape.
+ */
+export function capTexts(texts: readonly string[], limit: number): Capped {
+  let left = limit;
+  let omitted = 0;
+
+  const kept = texts.map((text) => {
+    if (text.length <= left) {
+      left -= text.length;
+      return text;
+    }
+
+    let end = left;
+    const newline = text.lastIndexOf("\n", end - 1);
+    if (newline >= 0) {
+      end = newline + 1;
+    } else if (end > 0 && isHighSurrogate(text.charCodeAt(end - 1))) {
+      end -= 1;
+    }
+
+    omitted += text.length - end;
+    left = 0;
+    return text.slice(0, end);
+  });
+
+  return { texts: kept, omitted };
+}
+
+/** Total characters across a list of texts. */
+export function totalLength(texts: readonly string[]): number {
+  return texts.reduce((sum, text) => sum + text.length, 0);
+}
