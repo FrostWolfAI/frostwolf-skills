@@ -69,3 +69,82 @@ describe("hooks.json", () => {
     }
   });
 });
+
+const CURSOR_EVENTS: Readonly<Record<string, HookEvent>> = {
+  sessionStart: "SessionStart",
+  beforeSubmitPrompt: "UserPromptSubmit",
+  preToolUse: "PreToolUse",
+  postToolUse: "PostToolUse",
+  sessionEnd: "SessionEnd",
+};
+
+const codexPlugin = JSON.parse(readFileSync(".codex-plugin/plugin.json", "utf8")) as {
+  version: string;
+  hooks: string;
+};
+const cursorPlugin = JSON.parse(readFileSync(".cursor-plugin/plugin.json", "utf8")) as {
+  version: string;
+  hooks: string;
+};
+const opencodePackage = JSON.parse(readFileSync("../package.json", "utf8")) as {
+  version: string;
+  exports: Record<string, string>;
+};
+const codexHooks = JSON.parse(readFileSync("hooks/codex.json", "utf8")) as {
+  hooks: Record<string, Array<{ hooks: Array<{ command: string; timeout: number }> }>>;
+};
+const cursorHooks = JSON.parse(readFileSync("hooks/cursor.json", "utf8")) as {
+  version: number;
+  hooks: Record<string, Array<{ command: string; timeout: number; failClosed?: boolean }>>;
+};
+
+describe("other hosts' manifests", () => {
+  it("carry the package version", () => {
+    expect(codexPlugin.version).toBe(pkg.version);
+    expect(cursorPlugin.version).toBe(pkg.version);
+    expect(opencodePackage.version).toBe(pkg.version);
+  });
+
+  it("point at their own hooks file, not Claude Code's", () => {
+    expect(codexPlugin.hooks).toBe("./hooks/codex.json");
+    expect(cursorPlugin.hooks).toBe("./hooks/cursor.json");
+  });
+
+  it("load the bundled OpenCode plugin under both OpenCode 1 and 2", () => {
+    expect(opencodePackage.exports["."]).toBe("./claude-code/dist/opencode.mjs");
+    expect(opencodePackage.exports["./server"]).toBe("./claude-code/dist/opencode.mjs");
+  });
+});
+
+describe("hooks/codex.json", () => {
+  it.each(Object.entries(codexHooks.hooks))("runs %s through the Codex adapter in time", (event, groups) => {
+    const entry = groups[0]?.hooks[0];
+    expect(entry?.command).toBe('node "${PLUGIN_ROOT}/dist/hook.mjs" --host codex');
+    expect((entry?.timeout ?? 0) * MS_PER_SECOND).toBeGreaterThan(DEADLINES_MS[event as HookEvent]);
+  });
+
+  it("registers the events Codex can act on", () => {
+    expect(Object.keys(codexHooks.hooks).sort()).toEqual(
+      ["PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "UserPromptSubmit"],
+    );
+  });
+});
+
+describe("hooks/cursor.json", () => {
+  it("registers every Cursor event the adapter handles", () => {
+    expect(cursorHooks.version).toBe(1);
+    expect(Object.keys(cursorHooks.hooks).sort()).toEqual(Object.keys(CURSOR_EVENTS).sort());
+  });
+
+  it.each(Object.entries(CURSOR_EVENTS))("runs %s through the Cursor adapter in time", (event, handled) => {
+    const entry = cursorHooks.hooks[event]?.[0];
+    expect(entry?.command).toBe('node "${CURSOR_PLUGIN_ROOT}/dist/hook.mjs" --host cursor');
+    expect((entry?.timeout ?? 0) * MS_PER_SECOND).toBeGreaterThan(DEADLINES_MS[handled]);
+  });
+
+  it("refuses a tool call when the hook itself fails, and nothing else", () => {
+    for (const [event, entries] of Object.entries(cursorHooks.hooks)) {
+      expect(entries[0]?.failClosed === true).toBe(event === "preToolUse");
+    }
+  });
+});

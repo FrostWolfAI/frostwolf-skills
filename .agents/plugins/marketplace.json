@@ -1,0 +1,12 @@
+{
+  "name": "frostwolf",
+  "plugins": [
+    {
+      "name": "frostwolf",
+      "source": {
+        "source": "local",
+        "path": "./claude-code"
+      }
+    }
+  ]
+}

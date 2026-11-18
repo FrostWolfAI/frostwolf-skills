@@ -1,0 +1,62 @@
+{
+  "description": "FrostWolf for Codex: cloak personal data and secrets, and block prompt injection.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" --host codex",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" --host codex",
+            "timeout": 30,
+            "statusMessage": "FrostWolf: checking prompt"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" --host codex",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" --host codex",
+            "timeout": 60,
+            "statusMessage": "FrostWolf: cloaking tool output"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/dist/hook.mjs\" --host codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

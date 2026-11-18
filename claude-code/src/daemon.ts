@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { FetchLike } from "@frostwolfai/sdk";
-import { INTEGRATION, installIdIn } from "./checkin.js";
+import { installIdIn } from "./checkin.js";
 import { readSurroundings } from "./inventory.js";
 import { Handlers, type PromptCloakRequest } from "./handlers.js";
 import { GuardPool, type KeyedConfig } from "./pool.js";
@@ -19,7 +19,7 @@ import {
   type ServiceRequest,
   type ServiceResponse,
 } from "./types.js";
-import type { HookConfig } from "./config.js";
+import { HOSTS, type HookConfig, type Host } from "./config.js";
 import { PLUGIN_VERSION } from "./version.js";
 
 /**
@@ -109,8 +109,8 @@ export async function startService(
       onError: log,
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     },
-    (hostVersion) => ({
-      integration: INTEGRATION,
+    (host, hostVersion) => ({
+      integration: host,
       clientVersion: PLUGIN_VERSION,
       ...(hostVersion === null ? {} : { hostVersion }),
       ...(dataDir === undefined ? {} : { installId: (installId ??= installIdIn(dataDir)) }),
@@ -283,9 +283,13 @@ function parseRequest(body: string): ServiceRequest | null {
   }
   const input = parseHookInput(raw.input);
   const hostVersion = typeof raw.hostVersion === "string" ? raw.hostVersion : null;
-  return input === null
-    ? null
-    : { config: raw.config as unknown as HookConfig, input, hostVersion };
+  const { host, ...rest } = raw.config;
+  // A host the service does not know is reported as Claude Code rather than
+  // passed on, so telemetry only ever names an integration that exists.
+  const config = (
+    HOSTS.includes(host as Host) ? { ...rest, host } : rest
+  ) as unknown as HookConfig;
+  return input === null ? null : { config, input, hostVersion };
 }
 
 function parsePromptRequest(body: string): PromptCloakRequest | null {

@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/hook.mjs\" --host cursor",
+        "timeout": 15
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/hook.mjs\" --host cursor",
+        "timeout": 30
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/hook.mjs\" --host cursor",
+        "timeout": 30,
+        "failClosed": true
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/hook.mjs\" --host cursor",
+        "timeout": 60
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "node \"${CURSOR_PLUGIN_ROOT}/dist/hook.mjs\" --host cursor",
+        "timeout": 5
+      }
+    ]
+  }
+}

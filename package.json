@@ -1,0 +1,21 @@
+{
+  "name": "@frostwolfai/opencode",
+  "version": "0.1.12",
+  "private": true,
+  "description": "FrostWolf for OpenCode: cloak personal data and secrets, and block prompt injection.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./claude-code/dist/opencode.mjs",
+  "exports": {
+    ".": "./claude-code/dist/opencode.mjs",
+    "./server": "./claude-code/dist/opencode.mjs"
+  },
+  "files": [
+    "claude-code/dist/opencode.mjs"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FrostWolfAI/frostwolf-skills.git"
+  },
+  "homepage": "https://frostwolf.app"
+}

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { request } from "node:http";
 import { hostVersionOf } from "./checkin.js";
-import { configFromEnv, type HookConfig } from "./config.js";
+import { configFromEnv, readSettingsFile, type HookConfig, type Host } from "./config.js";
 import { DEADLINES_MS, HEALTH_PATH, HOOK_PATH } from "./protocol.js";
 
 export { DEADLINES_MS };
@@ -38,6 +38,12 @@ export interface HookRunOptions {
   readonly paths: () => RuntimePaths;
   /** Script that starts the service, or null to never start one. */
   readonly serviceScript: string | null;
+  /** The agent the event came from. Absent means Claude Code. */
+  readonly host?: Host;
+  /** The config file to read settings from, or null to read none. */
+  readonly configFile?: string | null;
+  /** The host's version when the event names it, as Cursor's does. */
+  readonly hostVersion?: string | null;
 }
 
 /**
@@ -50,7 +56,10 @@ export interface HookRunOptions {
 export async function runHook(
   options: HookRunOptions,
 ): Promise<HookOutput | null> {
-  const config = configFromEnv(options.env);
+  const config = configFromEnv(options.env, {
+    ...(options.host === undefined ? {} : { host: options.host }),
+    file: options.configFile == null ? null : readSettingsFile(options.configFile),
+  });
 
   let raw: unknown;
   try {
@@ -70,7 +79,7 @@ export async function runHook(
     return await ask(
       paths,
       options.serviceScript,
-      { config, input, hostVersion: hostVersionOf(options.env) },
+      { config, input, hostVersion: options.hostVersion ?? hostVersionOf(options.env) },
       DEADLINES_MS[input.hook_event_name],
     );
   } catch (error) {

@@ -2,8 +2,8 @@
 import { appendFileSync, unlinkSync } from "fs";
 import { createServer, request } from "http";
 import { createHash as createHash6 } from "crypto";
-import { homedir as homedir3 } from "os";
-import { join as join4 } from "path";
+import { homedir as homedir4 } from "os";
+import { join as join5 } from "path";
 
 // src/checkin.ts
 import { createHash, randomUUID } from "crypto";
@@ -12,7 +12,7 @@ import { hostname, release } from "os";
 import { basename, join } from "path";
 
 // src/version.ts
-var PLUGIN_VERSION = "0.1.11";
+var PLUGIN_VERSION = "0.1.12";
 
 // src/checkin.ts
 var INTEGRATION = "claude-code";
@@ -5178,8 +5178,28 @@ function labelOf(path, base) {
 }
 
 // src/messages.ts
-var NO_API_KEY_UNCHECKED = "FrostWolf has no API key, so this prompt and the tool output in this session are not being checked. Run /plugin, open frostwolf, and set the API key, or set FROSTWOLF_API_KEY.";
-var NO_API_KEY = "FrostWolf has no API key, so it cannot check this session. Run /plugin, open frostwolf, and set the API key, or set FROSTWOLF_API_KEY.";
+var HOST_NAMES = {
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  cursor: "Cursor",
+  opencode: "OpenCode"
+};
+function modelName(host) {
+  return host === "claude-code" ? "Claude" : "the model";
+}
+function capital(text2) {
+  return text2.charAt(0).toUpperCase() + text2.slice(1);
+}
+function whereToSetKey(host) {
+  const elsewhere = 'set FROSTWOLF_API_KEY, or put "api_key" in ~/.frostwolf/config.json';
+  return host === "claude-code" ? `Run /plugin, open frostwolf, and set the API key, or ${elsewhere}.` : `To set it, ${elsewhere}.`;
+}
+function noApiKeyUnchecked(host) {
+  return `FrostWolf has no API key, so this prompt and the tool output in this session are not being checked. ${whereToSetKey(host)}`;
+}
+function noApiKey(host) {
+  return `FrostWolf has no API key, so it cannot check this session. ${whereToSetKey(host)}`;
+}
 var SESSION_GUIDE = [
   "FrostWolf Cloak is active in this session.",
   "Personal data and secrets in tool output and prompts appear as tokens of the form [[<type>:<hex>]], such as an email address shown as [[email:\u2026]] with a hex id.",
@@ -5216,8 +5236,9 @@ function promptFlagged(attack) {
 function promptUnavailable(reason) {
   return `FrostWolf could not check this prompt, because ${uncheckedCause(reason)}, so it was not sent. Try again in a moment. To send prompts unchecked while FrostWolf is unreachable, set on_unavailable to allow.`;
 }
-function promptCloaked(entities) {
-  return `FrostWolf cloaked ${describeEntities(entities)} in this prompt before Claude saw it. Claude works with tokens, and FrostWolf puts the values back in tool calls and in what you read.`;
+function promptCloaked(entities, host = "claude-code") {
+  const model = modelName(host);
+  return `FrostWolf cloaked ${describeEntities(entities)} in this prompt before ${model} saw it. ${capital(model)} works with tokens, and FrostWolf puts the values back in tool calls and in what you read.`;
 }
 function promptData(entities) {
   return `The prompt carries personal data: ${describeEntities(entities)}.`;
@@ -5234,12 +5255,16 @@ function attachedUnchecked(label, reason) {
 function attachedTooLarge(label) {
   return `${label}, attached with @, is too large for FrostWolf to check.`;
 }
-function promptRefused(findings, suggestion, why) {
+function promptRefused(findings, suggestion, why, host = "claude-code") {
+  const name = HOST_NAMES[host];
   const reasons = [
-    ...why.prompt ? [
+    ...why.prompt && host !== "claude-code" ? [
+      `${name} does not let a hook rewrite a typed prompt, so FrostWolf can only send it as typed or refuse it. Set prompt_personal_data to warn to send such prompts as typed.`
+    ] : [],
+    ...why.prompt && host === "claude-code" ? [
       "FrostWolf cloaks a typed prompt in place through its Claude Code mod, which did not run here: mods need Claude Code 2.1.286 or newer, and an organization can turn off the mods its members install. Run claude --debug to see why."
     ] : [],
-    ...why.attached ? ["Claude Code attaches a file mentioned with @ without a tool call, so FrostWolf cannot cloak it."] : []
+    ...why.attached ? [`${name} attaches a file mentioned with @ without a tool call, so FrostWolf cannot cloak it.`] : []
   ];
   return [
     "FrostWolf did not send this prompt:",
@@ -5252,9 +5277,10 @@ function promptRefused(findings, suggestion, why) {
     suggestion
   ].join("\n");
 }
-function promptWarned(findings) {
+function promptWarned(findings, host = "claude-code") {
+  const model = modelName(host);
   return [
-    "FrostWolf sent this prompt to Claude as typed. It found:",
+    `FrostWolf sent this prompt to ${model} as typed. It found:`,
     ...findings.map((finding) => `- ${finding}`)
   ].join("\n");
 }
@@ -5383,6 +5409,49 @@ function notice(systemMessage) {
   return { systemMessage };
 }
 
+// src/pool.ts
+import { createHash as createHash4 } from "crypto";
+var GuardPool = class {
+  /**
+   * `sourceFor` names the plugin on a guard's events. A guard holds its session's
+   * vault, so it is built once and keeps the host version it was built with; a
+   * Claude Code upgrade shows on the next service, not by losing the vault.
+   */
+  constructor(deps, sourceFor) {
+    this.deps = deps;
+    this.sourceFor = sourceFor;
+  }
+  deps;
+  sourceFor;
+  guards = /* @__PURE__ */ new Map();
+  get(config, hostVersion = null) {
+    const key = keyOf(config);
+    let guard = this.guards.get(key);
+    if (guard === void 0) {
+      const source = this.sourceFor?.(hostOf(config), hostVersion);
+      guard = new AgentGuard(config, source === void 0 ? this.deps : { ...this.deps, source });
+      this.guards.set(key, guard);
+    }
+    return guard;
+  }
+  /** The guard for these settings if one exists, without building one. */
+  peek(config) {
+    return this.guards.get(keyOf(config));
+  }
+  async closeAll() {
+    await Promise.all([...this.guards.values()].map((guard) => guard.close()));
+    this.guards.clear();
+  }
+};
+function keyOf(config) {
+  return createHash4("sha256").update(
+    JSON.stringify([config.apiKey, config.endpoint, config.onUnavailable, hostOf(config)])
+  ).digest("hex");
+}
+function hostOf(config) {
+  return config.host ?? "claude-code";
+}
+
 // src/tokens.ts
 function tokenPattern2() {
   return /\[\[([a-z_]+):([0-9a-f]{12,64})\]\]/g;
@@ -5432,7 +5501,7 @@ var Handlers = class {
       return this.sessionEnd(config, input);
     }
     if (config.apiKey === null) {
-      return misconfigured(input.hook_event_name);
+      return misconfigured(input.hook_event_name, hostOf(config));
     }
     const keyed = { ...config, apiKey: config.apiKey };
     const guard = this.guards.get(keyed, hostVersion);
@@ -5441,7 +5510,9 @@ var Handlers = class {
     const context = contextOf(input.session_id);
     switch (input.hook_event_name) {
       case "SessionStart":
-        this.checkIn(keyed, hostVersion, input.cwd ?? null, input.session_id);
+        if (hostOf(keyed) === "claude-code") {
+          this.checkIn(keyed, hostVersion, input.cwd ?? null, input.session_id);
+        }
         return sessionContext(SESSION_GUIDE, null);
       case "UserPromptSubmit":
         return withSkillAlerts(
@@ -5517,7 +5588,7 @@ var Handlers = class {
       status: "cloaked",
       text: cloaked,
       message: [
-        promptCloaked(entities),
+        promptCloaked(entities, hostOf(config)),
         ...attack?.bySignature === true ? [promptAlsoFlagged(attack)] : []
       ].join("\n")
     };
@@ -5553,7 +5624,7 @@ var Handlers = class {
     }
     if (refusals.length === 0 && config.promptPersonalData !== "block") {
       const flagged = attack === null ? [] : [promptFlagged(attack)];
-      return notice([promptWarned(data), ...flagged].join("\n"));
+      return notice([promptWarned(data, hostOf(config)), ...flagged].join("\n"));
     }
     const alsoFlagged = attack?.bySignature === true ? [promptAlsoFlagged(attack)] : [];
     const base = promptEntities.size > 0 ? outcome?.texts[0] ?? "" : input.prompt;
@@ -5562,7 +5633,7 @@ var Handlers = class {
         promptRefused([...data, ...refusals], withoutMentions(base, attached), {
           prompt: promptEntities.size > 0,
           attached: fileFindings.length > 0
-        }),
+        }, hostOf(config)),
         ...alsoFlagged
       ].join("\n\n")
     );
@@ -5883,55 +5954,15 @@ function rewriteLanded(record2, texts) {
   const visible = (needle) => needle.length > 0 && texts.some((text2) => text2.includes(needle));
   return record2.replaced.some(({ replacement }) => visible(replacement)) || !record2.replaced.some(({ original }) => visible(original));
 }
-function misconfigured(event) {
+function misconfigured(event, host) {
   switch (event) {
     case "SessionStart":
-      return notice(NO_API_KEY);
+      return notice(noApiKey(host));
     case "UserPromptSubmit":
-      return notice(NO_API_KEY_UNCHECKED);
+      return notice(noApiKeyUnchecked(host));
     default:
       return null;
   }
-}
-
-// src/pool.ts
-import { createHash as createHash4 } from "crypto";
-var GuardPool = class {
-  /**
-   * `sourceFor` names the plugin on a guard's events. A guard holds its session's
-   * vault, so it is built once and keeps the host version it was built with; a
-   * Claude Code upgrade shows on the next service, not by losing the vault.
-   */
-  constructor(deps, sourceFor) {
-    this.deps = deps;
-    this.sourceFor = sourceFor;
-  }
-  deps;
-  sourceFor;
-  guards = /* @__PURE__ */ new Map();
-  get(config, hostVersion = null) {
-    const key = keyOf(config);
-    let guard = this.guards.get(key);
-    if (guard === void 0) {
-      const source = this.sourceFor?.(hostVersion);
-      guard = new AgentGuard(config, source === void 0 ? this.deps : { ...this.deps, source });
-      this.guards.set(key, guard);
-    }
-    return guard;
-  }
-  /** The guard for these settings if one exists, without building one. */
-  peek(config) {
-    return this.guards.get(keyOf(config));
-  }
-  async closeAll() {
-    await Promise.all([...this.guards.values()].map((guard) => guard.close()));
-    this.guards.clear();
-  }
-};
-function keyOf(config) {
-  return createHash4("sha256").update(
-    JSON.stringify([config.apiKey, config.endpoint, config.onUnavailable])
-  ).digest("hex");
 }
 
 // src/pointer.ts
@@ -6373,6 +6404,12 @@ function isRecord2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+// src/config.ts
+import { readFileSync as readFileSync4 } from "fs";
+import { homedir as homedir3 } from "os";
+import { join as join4 } from "path";
+var HOSTS = ["claude-code", "codex", "cursor", "opencode"];
+
 // src/daemon.ts
 var MAX_REQUEST_BYTES = 64 * 1024 * 1024;
 var DEFAULT_IDLE_MS = 2 * 60 * 60 * 1e3;
@@ -6408,8 +6445,8 @@ async function startService(options) {
       onError: log,
       ...options.fetch === void 0 ? {} : { fetch: options.fetch }
     },
-    (hostVersion) => ({
-      integration: INTEGRATION,
+    (host, hostVersion) => ({
+      integration: host,
       clientVersion: PLUGIN_VERSION,
       ...hostVersion === null ? {} : { hostVersion },
       ...dataDir === void 0 ? {} : { installId: installId ??= installIdIn(dataDir) }
@@ -6425,7 +6462,7 @@ async function startService(options) {
       const guard = guards.get(config, hostVersion);
       scanner = new SkillScanner(
         (text2) => guard.inspectSkill(text2),
-        dataDir === void 0 ? null : join4(dataDir, `${SKILL_VERDICTS_FILE}-${digestOf(key)}.json`)
+        dataDir === void 0 ? null : join5(dataDir, `${SKILL_VERDICTS_FILE}-${digestOf(key)}.json`)
       );
       scanners.set(key, scanner);
     }
@@ -6435,7 +6472,7 @@ async function startService(options) {
     {
       fetch: transport,
       installId: () => installId ??= installIdIn(dataDir),
-      surroundings: (at) => readSurroundings({ home: homedir3(), cwd: at, env: process.env, platform: process.platform }),
+      surroundings: (at) => readSurroundings({ home: homedir4(), cwd: at, env: process.env, platform: process.platform }),
       onError: log
     },
     sessions,
@@ -6501,7 +6538,7 @@ async function startService(options) {
       res.end();
     });
   });
-  const home = options.home ?? homedir3();
+  const home = options.home ?? homedir4();
   function notePointer(event, sessionId) {
     try {
       if (event === "SessionStart") {
@@ -6557,7 +6594,9 @@ function parseRequest(body) {
   }
   const input = parseHookInput(raw.input);
   const hostVersion = typeof raw.hostVersion === "string" ? raw.hostVersion : null;
-  return input === null ? null : { config: raw.config, input, hostVersion };
+  const { host, ...rest } = raw.config;
+  const config = HOSTS.includes(host) ? { ...rest, host } : rest;
+  return input === null ? null : { config, input, hostVersion };
 }
 function parsePromptRequest(body) {
   let raw;

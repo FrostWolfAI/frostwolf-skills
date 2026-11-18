@@ -171,4 +171,27 @@ describe("configFromEnv", () => {
   it("falls back to the default for a value outside the allowed set", () => {
     expect(configFromEnv({ FROSTWOLF_ON_UNAVAILABLE: "sometimes" }).onUnavailable).toBe("allow");
   });
+
+  it("names the host when one is given", () => {
+    expect(configFromEnv({}, { host: "codex" }).host).toBe("codex");
+    expect(configFromEnv({})).not.toHaveProperty("host");
+  });
+
+  it("reads the config file below the environment", () => {
+    const file = { api_key: "FW-TEST-FILE", on_threat: "block", endpoint: 42 };
+    const config = configFromEnv({ FROSTWOLF_ON_THREAT: "warn" }, { file });
+
+    expect(config.apiKey).toBe("FW-TEST-FILE");
+    expect(config.onThreat).toBe("warn");
+    expect(config.endpoint).toBeNull();
+  });
+
+  it("puts a host's own plugin options above the environment", () => {
+    const config = configFromEnv(
+      { FROSTWOLF_API_KEY: "FW-TEST-ENV" },
+      { options: { api_key: "FW-TEST-OPTION" }, file: { api_key: "FW-TEST-FILE" } },
+    );
+
+    expect(config.apiKey).toBe("FW-TEST-OPTION");
+  });
 });

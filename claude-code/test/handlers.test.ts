@@ -80,8 +80,8 @@ describe("telemetry", () => {
   it("names the plugin, its versions, and the installation on every event", async () => {
     const sourced = new GuardPool(
       { fetch: plane.fetch, onError: (error) => errors.push(error) },
-      (hostVersion) => ({
-        integration: "claude-code",
+      (host, hostVersion) => ({
+        integration: host,
         installId: "FW-TEST-INSTALL-001",
         clientVersion: "9.9.9",
         ...(hostVersion === null ? {} : { hostVersion }),
@@ -941,6 +941,13 @@ describe("without an API key", () => {
     expect(batch).toBeNull();
     expect(plane.scans).toHaveLength(0);
   });
+
+  it("tells a user of another host where to set the key", async () => {
+    const output = await run({ hook_event_name: "SessionStart" }, { ...unkeyed, host: "cursor" });
+
+    expect(String(output?.systemMessage)).toContain("~/.frostwolf/config.json");
+    expect(String(output?.systemMessage)).not.toContain("/plugin");
+  });
 });
 
 describe("SessionStart", () => {
@@ -964,5 +971,21 @@ describe("SessionStart", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.slice(1)).toEqual(["2.1.316", "/work/project", SESSION]);
+  });
+
+  it("checks in from Claude Code only, the one host the control plane takes a check-in from", async () => {
+    const calls: unknown[][] = [];
+    const checking = new Handlers(guards, new Sessions(), (...args) => {
+      calls.push(args);
+    });
+
+    const output = await checking.handle({
+      config: { ...CONFIG, host: "codex" },
+      input: { session_id: SESSION, cwd: "/work/project", hook_event_name: "SessionStart" } as unknown as HookInput,
+      hostVersion: null,
+    });
+
+    expect(calls).toHaveLength(0);
+    expect(specific(output).additionalContext).toContain("Copy tokens exactly");
   });
 });

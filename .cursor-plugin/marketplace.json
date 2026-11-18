@@ -1,0 +1,17 @@
+{
+  "name": "frostwolf",
+  "owner": {
+    "name": "FrostWolf",
+    "url": "https://frostwolf.app"
+  },
+  "metadata": {
+    "description": "FrostWolf plugins for Cursor"
+  },
+  "plugins": [
+    {
+      "name": "frostwolf",
+      "source": "claude-code",
+      "description": "Cloak personal data and secrets before the model sees them, and block prompt injection, in every session."
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { HookConfig } from "./config.js";
+import type { HookConfig, Host } from "./config.js";
 import type { ClientSource } from "@frostwolfai/sdk";
 import { AgentGuard, type GuardDeps } from "./guard.js";
 
@@ -23,14 +23,14 @@ export class GuardPool {
    */
   constructor(
     private readonly deps: GuardDeps,
-    private readonly sourceFor?: (hostVersion: string | null) => ClientSource,
+    private readonly sourceFor?: (host: Host, hostVersion: string | null) => ClientSource,
   ) {}
 
   get(config: KeyedConfig, hostVersion: string | null = null): AgentGuard {
     const key = keyOf(config);
     let guard = this.guards.get(key);
     if (guard === undefined) {
-      const source = this.sourceFor?.(hostVersion);
+      const source = this.sourceFor?.(hostOf(config), hostVersion);
       guard = new AgentGuard(config, source === undefined ? this.deps : { ...this.deps, source });
       this.guards.set(key, guard);
     }
@@ -51,7 +51,12 @@ export class GuardPool {
 function keyOf(config: KeyedConfig): string {
   return createHash("sha256")
     .update(
-      JSON.stringify([config.apiKey, config.endpoint, config.onUnavailable]),
+      JSON.stringify([config.apiKey, config.endpoint, config.onUnavailable, hostOf(config)]),
     )
     .digest("hex");
+}
+
+/** The agent a config came from. A hook from before hosts were named is Claude Code's. */
+export function hostOf(config: HookConfig): Host {
+  return config.host ?? "claude-code";
 }

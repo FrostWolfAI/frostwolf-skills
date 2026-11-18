@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { RestoreDeniedError, type CloakContext } from "@frostwolfai/sdk";
-import type { HookConfig } from "./config.js";
+import type { HookConfig, Host } from "./config.js";
 import { capTexts, MAX_RESULT_CHARS, totalLength } from "./chunks.js";
 import { entityCounts, type AgentGuard, type TextsOutcome } from "./guard.js";
 import type { FlaggedSkill } from "./skills.js";
@@ -18,7 +18,7 @@ import {
   sessionContext,
   stopBatch,
 } from "./outputs.js";
-import type { GuardPool, KeyedConfig } from "./pool.js";
+import { hostOf, type GuardPool, type KeyedConfig } from "./pool.js";
 import { DEADLINES_MS, REMOVED_MARKER } from "./protocol.js";
 import type { SessionState, Sessions, ToolRecord } from "./session.js";
 import { hasTokens, tokensIn } from "./tokens.js";
@@ -138,7 +138,7 @@ export class Handlers {
     }
 
     if (config.apiKey === null) {
-      return misconfigured(input.hook_event_name);
+      return misconfigured(input.hook_event_name, hostOf(config));
     }
 
     const keyed: KeyedConfig = { ...config, apiKey: config.apiKey };
@@ -149,7 +149,11 @@ export class Handlers {
 
     switch (input.hook_event_name) {
       case "SessionStart":
-        this.checkIn(keyed, hostVersion, input.cwd ?? null, input.session_id);
+        // The check-in and its inventory read Claude Code's own settings, and the
+        // control plane accepts them from Claude Code only.
+        if (hostOf(keyed) === "claude-code") {
+          this.checkIn(keyed, hostVersion, input.cwd ?? null, input.session_id);
+        }
         return sessionContext(say.SESSION_GUIDE, null);
       case "UserPromptSubmit":
         return withSkillAlerts(
@@ -237,7 +241,7 @@ export class Handlers {
       status: "cloaked",
       text: cloaked,
       message: [
-        say.promptCloaked(entities),
+        say.promptCloaked(entities, hostOf(config)),
         ...(attack?.bySignature === true ? [say.promptAlsoFlagged(attack)] : []),
       ].join("\n"),
     };
@@ -291,7 +295,7 @@ export class Handlers {
     }
     if (refusals.length === 0 && config.promptPersonalData !== "block") {
       const flagged = attack === null ? [] : [say.promptFlagged(attack)];
-      return notice([say.promptWarned(data), ...flagged].join("\n"));
+      return notice([say.promptWarned(data, hostOf(config)), ...flagged].join("\n"));
     }
 
     // The model check reads personal data itself as unsafe, so a model flag on a
@@ -306,7 +310,7 @@ export class Handlers {
         say.promptRefused([...data, ...refusals], withoutMentions(base, attached), {
           prompt: promptEntities.size > 0,
           attached: fileFindings.length > 0,
-        }),
+        }, hostOf(config)),
         ...alsoFlagged,
       ].join("\n\n"),
     );
@@ -782,12 +786,12 @@ function rewriteLanded(record: ToolRecord, texts: readonly string[]): boolean {
  * What each event does without an API key: say so, and stop nothing. Without a
  * key nothing was ever cloaked, so no call carries a token to restore.
  */
-function misconfigured(event: HookEvent): HookOutput | null {
+function misconfigured(event: HookEvent, host: Host): HookOutput | null {
   switch (event) {
     case "SessionStart":
-      return notice(say.NO_API_KEY);
+      return notice(say.noApiKey(host));
     case "UserPromptSubmit":
-      return notice(say.NO_API_KEY_UNCHECKED);
+      return notice(say.noApiKeyUnchecked(host));
     default:
       return null;
   }

@@ -1,0 +1,21 @@
+{
+  "name": "frostwolf",
+  "displayName": "FrostWolf",
+  "version": "0.1.12",
+  "description": "Cloak personal data and secrets before the model sees them, and block prompt injection, in every session.",
+  "author": {
+    "name": "FrostWolf",
+    "url": "https://frostwolf.app"
+  },
+  "homepage": "https://frostwolf.app",
+  "repository": "https://github.com/FrostWolfAI/frostwolf-skills",
+  "license": "Apache-2.0",
+  "keywords": [
+    "security",
+    "pii",
+    "prompt-injection",
+    "cloak",
+    "frostwolf"
+  ],
+  "hooks": "./hooks/cursor.json"
+}

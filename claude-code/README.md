@@ -1,4 +1,4 @@
-# FrostWolf for Claude Code
+# FrostWolf for Claude Code, Codex, Cursor, and OpenCode
 
 Cloak personal data and secrets before Claude sees them, and block prompt
 injection, in every Claude Code session.
@@ -6,6 +6,10 @@ injection, in every Claude Code session.
 The plugin runs as Claude Code hooks. It changes no base URL and runs no proxy.
 Detection runs on the FrostWolf control plane, as it does for the SDKs, so the
 plugin ships no detection rules of its own.
+
+The same plugin also runs in Codex, Cursor, and OpenCode. Each agent lets a
+plugin change different things, so what FrostWolf can do differs by agent; see
+[Other agents](#other-agents).
 
 ## Requirements
 
@@ -105,6 +109,19 @@ variable instead.
 | `on_threat` | `FROSTWOLF_ON_THREAT` | `warn` | `warn` lets a flagged tool call, attached file, or failed call's output through and tells you and Claude. `block` stops it. Injected text in a tool result is taken out either way. |
 | `display` | `FROSTWOLF_DISPLAY` | `restore` | `restore` shows real values. `tokens` shows tokens. |
 
+Every agent can also read the settings from `~/.frostwolf/config.json`, or the
+file `FROSTWOLF_CONFIG` names, with the option names as keys:
+
+```json
+{ "api_key": "YOUR_API_KEY", "on_threat": "block" }
+```
+
+A plugin option wins over the environment variable, and the variable wins over
+the file. Codex and Cursor have no settings screen for a plugin, and a desktop
+app does not pass on your shell's environment, so the file is the simplest
+place to put the key there. Keep it readable by your account only
+(`chmod 600`).
+
 ## Without the plugin
 
 Clone [frostwolf-skills](https://github.com/FrostWolfAI/frostwolf-skills) and
@@ -121,6 +138,83 @@ uses the same command:
 
 Register it for the events in `hooks/hooks.json`, with the same timeouts and
 `onFailure` settings, and set `FROSTWOLF_API_KEY` in the environment.
+
+## Other agents
+
+| | Claude Code | Codex | Cursor | OpenCode |
+| --- | --- | --- | --- | --- |
+| Cloak a typed prompt in place | Yes, through the mod | No: refuse or warn | No: refuse or warn | Yes |
+| Cloak a tool result | Yes | Yes | MCP tools only | Yes |
+| Take injected text out of a tool result | Yes | Yes | MCP tools only | Yes |
+| Restore values into a tool call | Yes | Yes | Yes | Yes |
+| Refuse a flagged tool call | Yes | Yes | Yes | Yes |
+| Check a failed call's output | Yes | No | No | No |
+| Show real values on screen | Yes | No | No | No |
+| Report the device to the console | Yes | No | No | No |
+
+Where an agent cannot cloak a prompt, `prompt_personal_data` decides: `cloak`
+and `warn` send it as typed and say so, `block` refuses it and offers a
+cloaked version to send instead. Where Cursor cannot rewrite a built-in tool's
+result, FrostWolf tells the model what it found and not to repeat or follow it.
+
+Telemetry names the agent, so the console shows which one each event came
+from.
+
+### Codex
+
+```bash
+codex plugin marketplace add FrostWolfAI/frostwolf-skills
+codex plugin add frostwolf@frostwolf
+```
+
+Codex reads `.codex-plugin/plugin.json` and runs `hooks/codex.json`. Codex
+has no field to replace a tool's result, so the cloaked result is handed back
+as the hook's reason, which Codex gives the model in place of the original.
+Codex cannot be told to refuse a call when the hook itself fails, so a hook
+that crashes lets the call through.
+
+### Cursor
+
+In Cursor, open **Customize**, choose **From GitHub Repository**, enter
+`FrostWolfAI/frostwolf-skills`, and install **frostwolf**. To run it from a
+clone instead, link `claude-code` into `~/.cursor/plugins/local/frostwolf` and
+reload the window.
+
+Cursor reads `.cursor-plugin/plugin.json` and runs `hooks/cursor.json`. A tool
+call is refused when its hook fails (`failClosed`), as in Claude Code.
+
+### OpenCode
+
+OpenCode loads plugins into its own process, so there is no hook command and
+no local service: the vault lives as long as OpenCode does. One module serves
+OpenCode 1 and 2.
+
+OpenCode 2:
+
+```bash
+opencode plugin add github:FrostWolfAI/frostwolf-skills
+```
+
+Then set the key in `~/.frostwolf/config.json`, or as an option on the entry in
+`opencode.json`:
+
+```json
+{
+  "plugins": [
+    { "package": "github:FrostWolfAI/frostwolf-skills", "options": { "api_key": "YOUR_API_KEY" } }
+  ]
+}
+```
+
+OpenCode 1: clone the repository and add the bundled module to `opencode.json`:
+
+```json
+{ "plugin": ["file:///path/to/frostwolf-skills/claude-code/dist/opencode.mjs"] }
+```
+
+OpenCode 2 cannot refuse a prompt, so a prompt FrostWolf refuses is replaced by
+the refusal, and its own text never reaches the model. OpenCode 1 reports the
+refusal as an error and sends nothing.
 
 ## How it is built
 
@@ -218,6 +312,11 @@ departs from the SDK defaults in one place: every entity category is
 tokenized, including credentials and card codes. In a coding session Claude
 writes files from what it read, and a redacted secret would be written back as
 the redaction label.
+
+Each agent's hook format is translated in `src/hosts/` (Codex, Cursor) and
+`src/opencode/` (OpenCode), into the Claude Code events the handlers read and
+back. The differences in what each agent allows are listed under
+[Other agents](#other-agents).
 
 ## License
 
